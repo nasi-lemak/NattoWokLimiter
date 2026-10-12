@@ -75,7 +75,10 @@ pub struct Accountant {
     /// Forget apps that have had no sockets for this long.
     retain_ms: u64,
     last_ms: Option<u64>,
-    prev_conns: HashMap<ConnKey, (u64, u64)>,
+    /// Last counters per socket and when they were seen. Kept for a while
+    /// after a socket disappears, so a closed socket reported again later
+    /// only counts what it moved since.
+    prev_conns: HashMap<ConnKey, (u64, u64, u64)>,
     prev_ifaces: HashMap<String, (u64, u64)>,
     apps: HashMap<AppId, AppStats>,
     system: SystemStats,
@@ -118,7 +121,6 @@ impl Accountant {
         }
 
         let mut deltas = Vec::new();
-        let mut next_conns = HashMap::with_capacity(snap.connections.len());
         for conn in &snap.connections {
             let process = snap.process_of(conn);
             let app = process.map(|p| p.app_id());
@@ -126,13 +128,13 @@ impl Accountant {
             let (up, down) = match self.prev_conns.get(&conn.key) {
                 // Counters only grow for a given socket; a decrease means the
                 // platform reused the key, so count from zero.
-                Some(&(ps, pr)) => {
+                Some(&(ps, pr, _)) => {
                     (if sent >= ps { sent - ps } else { sent }, if recv >= pr { recv - pr } else { recv })
                 }
                 None if primed => (sent, recv),
                 None => (0, 0),
             };
-            next_conns.insert(conn.key.clone(), (sent, recv));
+            self.prev_conns.insert(conn.key.clone(), (sent, recv, snap.mono_ms));
             let loopback = conn.is_loopback();
             let counted = !loopback || self.count_loopback;
 
@@ -150,7 +152,9 @@ impl Accountant {
                     last_seen_ms: snap.mono_ms,
                 });
                 stats.pids.insert(process.pid);
-                stats.connections += 1;
+                if !conn.closed {
+                    stats.connections += 1;
+                }
                 if counted {
                     stats.rate_up += up;
                     stats.rate_down += down;
@@ -161,9 +165,9 @@ impl Accountant {
                 deltas.push(ConnDelta { key: conn.key.clone(), app, up, down, loopback });
             }
         }
-        self.prev_conns = next_conns;
-
         let retain_ms = self.retain_ms;
+        self.prev_conns.retain(|_, &mut (_, _, seen)| snap.mono_ms.saturating_sub(seen) <= retain_ms);
+
         self.apps.retain(|_, s| snap.mono_ms.saturating_sub(s.last_seen_ms) <= retain_ms);
         for stats in self.apps.values_mut() {
             // rate_* held raw byte deltas until now.
@@ -239,6 +243,7 @@ mod tests {
                 bytes_sent: Some(sent),
                 bytes_recv: Some(recv),
                 rtt_us: None,
+                closed: false,
             });
         }
         s.interfaces = vec![
@@ -288,6 +293,21 @@ mod tests {
         acc.ingest(&lo);
         acc.ingest(&next);
         assert_eq!(acc.apps().next().unwrap().total_up, 500);
+    }
+
+    #[test]
+    fn a_socket_reported_again_after_a_gap_counts_only_new_bytes() {
+        let mut acc = Accountant::new(4, 60_000);
+        acc.ingest(&snap(0, &[(1, 0, 0)], (0, 0)));
+        acc.ingest(&snap(1000, &[(1, 100, 100)], (0, 0)));
+        acc.ingest(&snap(2000, &[], (0, 0))); // closed, not reported
+        let mut closed = snap(3000, &[(1, 150, 120)], (0, 0));
+        closed.connections[0].closed = true;
+        let d = acc.ingest(&closed);
+        assert_eq!((d[0].up, d[0].down), (50, 20));
+        let app = acc.apps().next().unwrap();
+        assert_eq!((app.total_up, app.total_down), (150, 120));
+        assert_eq!(app.connections, 0, "closed sockets are not open connections");
     }
 
     #[test]

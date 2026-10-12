@@ -43,6 +43,10 @@ struct Args {
     /// Don't look up host names of remote addresses (reverse DNS).
     #[arg(long)]
     no_resolve: bool,
+    /// Don't load the eBPF traffic counters (Linux); per-app bytes then
+    /// cover TCP only.
+    #[arg(long)]
+    no_ebpf: bool,
 }
 
 /// The monitor, the enforcer, and a warning when enforcement had to be disabled.
@@ -53,7 +57,8 @@ fn backends(args: &Args) -> anyhow::Result<Backends> {
         let (monitor, enforcer) = nwl_platform::sim::simulated();
         return Ok((Box::new(monitor), Box::new(enforcer), None));
     }
-    let monitor = nwl_platform::native_monitor().context("starting the traffic monitor")?;
+    let opts = nwl_platform::MonitorOptions { ebpf: !args.no_ebpf, count_loopback: args.include_loopback };
+    let monitor = nwl_platform::native_monitor(opts).context("starting the traffic monitor")?;
     if args.monitor_only {
         return Ok((monitor, Box::new(NullEnforcer), None));
     }
@@ -62,7 +67,6 @@ fn backends(args: &Args) -> anyhow::Result<Backends> {
         Ok(enforcer) => Ok((monitor, enforcer, None)),
         Err(e) => {
             let warning = format!("enforcement unavailable, running in monitor-only mode: {e}");
-            tracing::warn!("{warning}");
             Ok((monitor, Box::new(NullEnforcer), Some(warning)))
         }
     }
@@ -168,7 +172,10 @@ async fn main() -> anyhow::Result<()> {
     engine.status.monitor = monitor.name().to_string();
     engine.status.enforcer = enforcer.name().to_string();
     engine.status.enforcing = !args.monitor_only && warning.is_none();
-    engine.status.warnings.extend(warning);
+    for w in monitor.warnings().into_iter().chain(warning) {
+        tracing::warn!("{w}");
+        engine.add_startup_warning(w);
+    }
     tracing::info!(monitor = monitor.name(), enforcer = enforcer.name(), state = %state_dir.display(), "starting");
 
     let engine = Arc::new(Mutex::new(engine));

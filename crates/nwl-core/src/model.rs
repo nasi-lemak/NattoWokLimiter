@@ -149,6 +149,10 @@ pub struct Connection {
     pub bytes_recv: Option<u64>,
     /// Smoothed round-trip time in microseconds (TCP only).
     pub rtt_us: Option<u32>,
+    /// The socket is already gone; it is reported once more so the bytes it
+    /// moved since the last sample are still counted. Not shown as open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
 }
 
 impl Connection {
@@ -212,6 +216,7 @@ mod tests {
             bytes_sent: None,
             bytes_recv: None,
             rtt_us: None,
+            closed: false,
         };
         assert!(conn("127.0.0.1:1", Some("127.0.0.1:2")).is_loopback());
         assert!(conn("[::1]:1", None).is_loopback());

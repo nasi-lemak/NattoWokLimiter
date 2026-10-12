@@ -283,6 +283,7 @@ fn to_conn(c: &SimConn, rtt_us: Option<u32>) -> Connection {
         bytes_sent: Some(c.sent),
         bytes_recv: Some(c.recv),
         rtt_us,
+        closed: false,
     }
 }
 

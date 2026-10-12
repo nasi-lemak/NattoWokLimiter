@@ -9,7 +9,7 @@
 //!
 //! | Platform | Monitor | Enforcer |
 //! |----------|---------|----------|
-//! | Linux    | `NETLINK_SOCK_DIAG` + `/proc` | cgroup v2 + nftables |
+//! | Linux    | `NETLINK_SOCK_DIAG` + `/proc`, eBPF byte counters | cgroup v2 + nftables |
 //! | Windows  | IP Helper (`GetExtendedTcpTable`, TCP EStats) | Windows Firewall + QoS policies |
 //! | any      | [`sim::SimulatedMonitor`] (demo data) | [`NullEnforcer`] (monitor only) |
 
@@ -50,6 +50,27 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub trait Monitor: Send {
     fn name(&self) -> &'static str;
     fn snapshot(&mut self) -> Result<Snapshot>;
+    /// Degraded capabilities worth telling the user about.
+    fn warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Options for constructing the native monitor.
+#[derive(Debug, Clone)]
+pub struct MonitorOptions {
+    /// Use eBPF for exact per-socket counters of every protocol (Linux,
+    /// needs root). Falls back to TCP-only counters when unavailable.
+    pub ebpf: bool,
+    /// Count loopback traffic at the source (eBPF counters skip packets on
+    /// the loopback interface otherwise).
+    pub count_loopback: bool,
+}
+
+impl Default for MonitorOptions {
+    fn default() -> Self {
+        Self { ebpf: true, count_loopback: false }
+    }
 }
 
 /// What an enforcer should make the kernel do.
@@ -102,17 +123,19 @@ pub struct EnforcerOptions {
 }
 
 /// The native monitor for this OS.
-pub fn native_monitor() -> Result<Box<dyn Monitor>> {
+pub fn native_monitor(opts: MonitorOptions) -> Result<Box<dyn Monitor>> {
     #[cfg(target_os = "linux")]
     {
-        Ok(Box::new(linux::LinuxMonitor::new()?))
+        Ok(Box::new(linux::LinuxMonitor::new(&opts)?))
     }
     #[cfg(windows)]
     {
+        let _ = opts;
         Ok(Box::new(windows::WindowsMonitor::new()?))
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
+        let _ = opts;
         Err(Error::Unsupported("no native monitor for this OS yet; use --demo".into()))
     }
 }

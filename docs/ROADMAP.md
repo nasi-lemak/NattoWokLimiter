@@ -5,10 +5,11 @@ trade-offs stay visible.
 
 ## Accuracy and control
 
-- **eBPF backend (Linux).** `cgroup_skb` programs at the root cgroup, keyed by socket cookie, would give:
-  exact per-process bytes for UDP/QUIC (today only TCP is per-app), classification at socket creation
-  (no one-tick window for new processes), and no cgroup moves at all. Keep the nftables backend as the
-  fallback for kernels without BTF.
+- **eBPF enforcement (Linux).** Counting is done in eBPF already (every protocol, per socket,
+  including short-lived sockets). Next, enforce there too: the same `cgroup_skb` programs can drop
+  and police by socket owner, with the verdict decided at socket creation. That removes the
+  one-tick window for new processes and the cgroup moves, and makes per-connection rules possible.
+  Keep nftables as the fallback for older kernels.
 - **True shaping instead of policing.** EDT pacing (`skb->tstamp` plus the `fq` qdisc) from eBPF, or
   HTB plus IFB as a non-eBPF path. Queueing is smoother than dropping, especially for UDP and for
   limits below about 1 Mbit/s.

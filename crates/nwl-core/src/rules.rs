@@ -616,6 +616,7 @@ mod tests {
             bytes_sent: None,
             bytes_recv: None,
             rtt_us: None,
+            closed: false,
         }
     }
 

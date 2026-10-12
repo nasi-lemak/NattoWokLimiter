@@ -236,7 +236,7 @@ fn read_cgroup(proc_root: &Path, pid: u32) -> Option<String> {
     text.lines().find_map(|l| l.strip_prefix("0::")).map(|s| s.trim().to_string())
 }
 
-fn find_cgroup2_mount(mountinfo: &str) -> Option<PathBuf> {
+pub(crate) fn find_cgroup2_mount(mountinfo: &str) -> Option<PathBuf> {
     mountinfo.lines().find_map(|line| {
         let (pre, post) = line.split_once(" - ")?;
         let fstype = post.split_whitespace().next()?;

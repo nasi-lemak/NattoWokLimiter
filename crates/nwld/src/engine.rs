@@ -46,6 +46,9 @@ pub struct Engine {
     events: VecDeque<Event>,
     next_event_id: u64,
     pub status: EnforcementStatus,
+    /// Warnings fixed at startup (degraded backends), shown alongside the
+    /// enforcer's per-tick warnings.
+    startup_warnings: Vec<String>,
     period_keys: BTreeMap<&'static str, String>,
     /// On the very first run every app is "new"; don't flood the event log.
     suppress_new_app_events: bool,
@@ -108,10 +111,16 @@ impl Engine {
             // `after=<last id seen>`), with room for a million events a second.
             next_event_id: (chrono::Utc::now().timestamp().max(1) as u64) * 1_000_000,
             status: EnforcementStatus::default(),
+            startup_warnings: Vec::new(),
             period_keys: BTreeMap::new(),
             suppress_new_app_events,
             dirty: false,
         })
+    }
+
+    pub fn add_startup_warning(&mut self, warning: String) {
+        self.status.warnings.push(warning.clone());
+        self.startup_warnings.push(warning);
     }
 
     pub fn set_resolver(&mut self, resolver: Resolver) {
@@ -230,7 +239,7 @@ impl Engine {
                 if self.status.error.take().is_some() {
                     self.push_event(EventKind::EnforcementRecovered);
                 }
-                self.status.warnings = report.warnings;
+                self.status.warnings = self.startup_warnings.iter().cloned().chain(report.warnings).collect();
             }
             Err(message) => {
                 if self.status.error.as_deref() != Some(message.as_str()) {
@@ -363,6 +372,8 @@ impl Engine {
             .snapshot
             .connections
             .iter()
+            // Closed sockets are only reported so their last bytes count.
+            .filter(|conn| !conn.closed)
             .filter_map(|conn| {
                 let process = self.snapshot.process_of(conn);
                 let app_id = process.map(|p| p.app_id());
@@ -474,6 +485,7 @@ mod tests {
             bytes_sent: Some(sent),
             bytes_recv: Some(recv),
             rtt_us: None,
+            closed: false,
         });
         s
     }
@@ -597,6 +609,16 @@ mod tests {
             .collect();
         assert_eq!(new, vec!["new".to_string()]);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_warnings_survive_enforcement_reports() {
+        let mut e = Engine::new(temp_store("warn"), 10).unwrap();
+        e.add_startup_warning("eBPF unavailable".into());
+        e.record_enforcement(Ok(EnforceReport { changed: false, warnings: vec!["rule 3: x".into()] }));
+        assert_eq!(e.status.warnings, vec!["eBPF unavailable".to_string(), "rule 3: x".to_string()]);
+        e.record_enforcement(Ok(EnforceReport::default()));
+        assert_eq!(e.status.warnings, vec!["eBPF unavailable".to_string()]);
     }
 
     #[test]

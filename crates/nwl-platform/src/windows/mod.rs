@@ -374,6 +374,7 @@ impl WindowsMonitor {
             bytes_sent: bytes.map(|b| b.0),
             bytes_recv: bytes.map(|b| b.1),
             rtt_us: None,
+            closed: false,
         });
     }
 }

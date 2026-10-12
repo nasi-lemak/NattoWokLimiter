@@ -37,7 +37,8 @@ There are three front ends over the same daemon:
 
 | Feature | Linux | Windows |
 |---|---|---|
-| Live per-app download/upload rates, session totals | ✅ exact per TCP socket (`sock_diag` + `tcp_info`) | ✅ TCP EStats (run as Administrator) |
+| Live per-app download/upload rates, session totals | ✅ every protocol incl. UDP/QUIC, exact per socket (eBPF; TCP-only fallback without root) | ✅ TCP (EStats, run as Administrator) |
+| Traffic of short-lived sockets and processes (a 30 ms `getent`) still credited | ✅ eBPF | ❌ |
 | Connection list: owner, state, rates, RTT, which rule applies | ✅ | ✅ (no RTT yet) |
 | Block an app / network / port (in, out or both) | ✅ nftables | ✅ Windows Firewall |
 | Bandwidth limits per app or network, download **and** upload | ✅ nftables policing | ⚠️ upload only (QoS policy) |
@@ -161,8 +162,14 @@ never reaches your ISP, and throttling it breaks local apps.
   totals, history), quotas, size/rate parsing, and the API types shared by the daemon and every
   client. No I/O.
 * **`nwl-platform`**: the OS backends, each a `Monitor` (observe) plus an `Enforcer` (apply rules):
-  * **Linux**: sockets come from `NETLINK_SOCK_DIAG` with `tcp_info`, which gives exact per-socket
-    byte counters and RTT without eBPF. Owners are resolved via `/proc/<pid>/fd`. To enforce,
+  * **Linux**: sockets come from `NETLINK_SOCK_DIAG`, owners from `/proc/<pid>/fd`. Bytes come from
+    three tiny eBPF programs on the root cgroup: one records which process (pid and name) created
+    each socket, two add every packet's length to that socket's counters, keyed by the socket cookie
+    `sock_diag` also reports. That counts UDP/QUIC too, and still credits sockets (and processes)
+    that are gone before the next sample. The programs are assembled in Rust and loaded with the raw
+    `bpf()` syscall, so there's no eBPF toolchain, BTF or extra dependency. They only observe
+    (always "allow"), and are BPF links, which the kernel removes when the daemon exits, even on a
+    crash. Without root, or with `--no-ebpf`, `tcp_info` gives TCP-only counters. To enforce,
     processes of targeted apps move into a child cgroup *inside their current cgroup*, so systemd
     units and desktop scopes still own them. One atomic nftables table then matches those sockets with
     `socket cgroupv2` and drops or polices their packets, using shared named `limit` objects.
@@ -201,9 +208,10 @@ pages).
 
 ## Known limitations
 
-* **Linux**: UDP and other non-TCP traffic shows in interface totals but not in per-app bytes. The
-  kernel doesn't keep per-socket UDP byte counters, and fixing that needs eBPF (see the roadmap). A
-  new process of a limited app is classified within one tick (1 s by default). Limits police (drop
+* **Linux**: per-app counts of every protocol need root (eBPF). Without it they cover TCP only, and
+  the UI says so. With eBPF, counted bytes are IP packet sizes (payload plus headers, including
+  retransmissions), which is what an ISP meters; the TCP-only fallback counts payload. A new process
+  of a limited app is classified within one tick (1 s by default). Limits police (drop
   above the rate) instead of queueing. That works well for TCP, but the first second of a transfer can
   exceed the limit, because the kernel's bucket holds one second of rate.
 * **Windows**: no download limits yet (they need a packet driver). Windows Firewall applies block
@@ -213,10 +221,10 @@ pages).
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md). The big ones: eBPF backend (exact UDP accounting, instant
-classification, true shaping and priorities), a Windows packet driver for download limits, ask-on-first-
-connection firewall prompts, hostnames and domain rules, schedules, and a native desktop app with a
-tray icon.
+See [docs/ROADMAP.md](docs/ROADMAP.md). The big ones: enforcement in eBPF (instant classification,
+true shaping and priorities), a Windows packet driver for download limits and UDP counts,
+ask-on-first-connection firewall prompts, domain rules from DNS answers, network profiles, and a tray
+icon for the desktop app.
 
 ## Development
 
