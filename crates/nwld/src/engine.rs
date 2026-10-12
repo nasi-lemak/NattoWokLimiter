@@ -2,14 +2,15 @@
 //! history and events, and produces the policy the enforcer applies.
 //! Free of I/O except through [`Store`], so it is tested with simulated data.
 
+use crate::resolver::Resolver;
 use crate::store::{KnownApps, Store, UsageDb};
-use chrono::{DateTime, Datelike, Local};
+use chrono::{DateTime, Datelike, Local, Timelike};
 use nwl_core::accounting::Accountant;
+use nwl_core::api::{AppView, ConnView, EnforcementStatus, Event, EventKind, Overview, UsageDay, UsageEntry};
 use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapshot};
 use nwl_core::quota::{QuotaStatus, QuotaTracker};
-use nwl_core::rules::{Action, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
+use nwl_core::rules::{Action, Day, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
 use nwl_platform::{EnforceReport, Policy};
-use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 const RULES: &str = "rules.json";
@@ -18,59 +19,20 @@ const USAGE: &str = "usage.json";
 const KNOWN_APPS: &str = "known_apps.json";
 const MAX_EVENTS: usize = 500;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EventKind {
-    /// An application used the network for the first time.
-    NewApp {
-        app: AppId,
-        name: String,
-    },
-    QuotaExhausted {
-        rule: RuleId,
-        name: String,
-    },
-    RuleAdded {
-        rule: RuleId,
-        name: String,
-    },
-    RuleChanged {
-        rule: RuleId,
-        name: String,
-    },
-    RuleRemoved {
-        rule: RuleId,
-        name: String,
-    },
-    EnforcementError {
-        message: String,
-    },
-    EnforcementRecovered,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Event {
-    pub id: u64,
-    /// Unix time in milliseconds.
-    pub time: i64,
-    #[serde(flatten)]
-    pub kind: EventKind,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct EnforcementStatus {
-    pub monitor: String,
-    pub enforcer: String,
-    pub enforcing: bool,
-    pub warnings: Vec<String>,
-    pub error: Option<String>,
-}
-
 pub struct Engine {
     /// Count localhost traffic in app statistics, usage and quotas.
     count_loopback: bool,
+    resolver: Option<Resolver>,
     store: Store,
+    /// Rules as configured.
     pub rules: RuleSet,
+    /// `rules` with schedules applied for the current local time; this is
+    /// what decisions, quotas and enforcement use.
+    effective: RuleSet,
+    /// Local weekday and minute of the last tick.
+    clock: Option<(Day, u16)>,
+    /// Quota rule -> period in which its 80% warning was raised.
+    warned: HashMap<RuleId, String>,
     accountant: Accountant,
     quotas: QuotaTracker,
     usage: UsageDb,
@@ -109,66 +71,6 @@ fn period_name(p: Period) -> &'static str {
     }
 }
 
-/// An application row in the UI.
-#[derive(Debug, Clone, Serialize)]
-pub struct AppView {
-    pub app: AppId,
-    pub name: String,
-    pub pids: Vec<u32>,
-    pub connections: usize,
-    pub rate_up: u64,
-    pub rate_down: u64,
-    pub total_up: u64,
-    pub total_down: u64,
-    /// Recent `(up, down)` rate samples; omitted in live updates.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<(u64, u64)>,
-    /// Rules scoped to this app.
-    pub rules: Vec<RuleId>,
-    /// The app-wide block rule, if any (what the UI's block toggle controls).
-    pub block_rule: Option<RuleId>,
-    /// The app-wide limit rule, if any.
-    pub limit_rule: Option<RuleId>,
-    pub blocked: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ConnView {
-    #[serde(flatten)]
-    pub conn: Connection,
-    pub app: Option<AppId>,
-    pub name: Option<String>,
-    pub rate_up: u64,
-    pub rate_down: u64,
-    pub blocked: bool,
-    pub access_rule: Option<RuleId>,
-    pub limits: Vec<RuleId>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Overview {
-    pub mono_ms: u64,
-    pub system: nwl_core::accounting::SystemStats,
-    pub apps: Vec<AppView>,
-    pub quotas: Vec<QuotaStatus>,
-    pub status: EnforcementStatus,
-    pub last_event: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UsageDay {
-    pub day: String,
-    pub apps: Vec<UsageEntry>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UsageEntry {
-    pub app: AppId,
-    pub name: String,
-    pub up: u64,
-    pub down: u64,
-}
-
 /// A matcher that only selects an application (the UI's one-click rules).
 fn app_only(rule: &Rule) -> bool {
     let m = &rule.matcher;
@@ -187,6 +89,10 @@ impl Engine {
         let suppress_new_app_events = !store.exists(KNOWN_APPS);
         Ok(Self {
             count_loopback: false,
+            resolver: None,
+            effective: rules.clone(),
+            clock: None,
+            warned: HashMap::new(),
             rules,
             accountant: Accountant::new(history_len, 5 * 60 * 1000),
             quotas: store.load(QUOTAS)?.unwrap_or_default(),
@@ -198,12 +104,18 @@ impl Engine {
             app_samples: HashMap::new(),
             exhausted: Vec::new(),
             events: VecDeque::new(),
-            next_event_id: 1,
+            // Event ids keep increasing across restarts (clients poll with
+            // `after=<last id seen>`), with room for a million events a second.
+            next_event_id: (chrono::Utc::now().timestamp().max(1) as u64) * 1_000_000,
             status: EnforcementStatus::default(),
             period_keys: BTreeMap::new(),
             suppress_new_app_events,
             dirty: false,
         })
+    }
+
+    pub fn set_resolver(&mut self, resolver: Resolver) {
+        self.resolver = Some(resolver);
     }
 
     pub fn set_count_loopback(&mut self, on: bool) {
@@ -224,10 +136,20 @@ impl Engine {
         self.period_keys.get(period_name(period)).cloned().unwrap_or_default()
     }
 
+    fn refresh_effective(&mut self) {
+        self.effective = match self.clock {
+            Some((day, minute)) => self.rules.effective_at(day, minute),
+            None => self.rules.clone(),
+        };
+    }
+
     pub fn ingest(&mut self, snap: Snapshot, now: DateTime<Local>) {
         for p in [Period::Day, Period::Week, Period::Month] {
             self.period_keys.insert(period_name(p), period_key(p, &now));
         }
+        let day = Day::from_index(now.weekday().num_days_from_monday() as usize);
+        self.clock = Some((day, (now.hour() * 60 + now.minute()) as u16));
+        self.refresh_effective();
         let day = self.key_for(Period::Day);
         let elapsed_ms = snap.mono_ms.saturating_sub(self.snapshot.mono_ms).max(1);
         let deltas = self.accountant.ingest(&snap);
@@ -244,8 +166,10 @@ impl Engine {
             }
             let Some(conn) = conns.get(&d.key) else { continue };
             let ctx = MatchCtx { conn, process: snap.process_of(conn) };
-            for id in self.rules.decide(&ctx, &[]).quotas {
-                if let Some(Action::Quota { period, direction, .. }) = self.rules.get(id).map(|r| &r.action) {
+            for id in self.effective.decide(&ctx, &[]).quotas {
+                if let Some(Action::Quota { period, direction, .. }) =
+                    self.effective.get(id).map(|r| &r.action)
+                {
                     let bytes = match direction {
                         Direction::In => d.down,
                         Direction::Out => d.up,
@@ -279,19 +203,25 @@ impl Engine {
     fn refresh_exhausted(&mut self) {
         let keys = self.period_keys.clone();
         let status =
-            self.quotas.status(&self.rules, |p| keys.get(period_name(p)).cloned().unwrap_or_default());
-        let exhausted: Vec<RuleId> = status.iter().filter(|s| s.exhausted).map(|s| s.rule).collect();
-        for id in &exhausted {
-            if !self.exhausted.contains(id) {
-                let name = self.rules.get(*id).map(|r| r.name.clone()).unwrap_or_default();
-                self.push_event(EventKind::QuotaExhausted { rule: *id, name });
+            self.quotas.status(&self.effective, |p| keys.get(period_name(p)).cloned().unwrap_or_default());
+        let mut exhausted = Vec::new();
+        for s in &status {
+            let name = self.rules.get(s.rule).map(|r| r.name.clone()).unwrap_or_default();
+            if s.exhausted {
+                exhausted.push(s.rule);
+                if !self.exhausted.contains(&s.rule) {
+                    self.push_event(EventKind::QuotaExhausted { rule: s.rule, name });
+                }
+            } else if s.used * 10 >= s.limit * 8 && self.warned.get(&s.rule) != Some(&s.period_key) {
+                self.warned.insert(s.rule, s.period_key.clone());
+                self.push_event(EventKind::QuotaWarning { rule: s.rule, name, percent: 80 });
             }
         }
         self.exhausted = exhausted;
     }
 
     pub fn policy(&self) -> Policy<'_> {
-        Policy { rules: &self.rules, exhausted_quotas: &self.exhausted, snapshot: &self.snapshot }
+        Policy { rules: &self.effective, exhausted_quotas: &self.exhausted, snapshot: &self.snapshot }
     }
 
     pub fn record_enforcement(&mut self, result: Result<EnforceReport, String>) {
@@ -361,6 +291,8 @@ impl Engine {
 
     fn rules_changed(&mut self) {
         self.quotas.retain_rules(&self.rules);
+        self.warned.retain(|id, _| self.rules.get(*id).is_some());
+        self.refresh_effective();
         self.refresh_exhausted();
         if let Err(e) = self.save_rules() {
             tracing::error!("saving rules: {e:#}");
@@ -382,15 +314,24 @@ impl Engine {
                         (None, _) => false,
                     })
                     .collect();
+                // The one-click toggles control unscheduled app-wide rules.
+                let one_click = |r: &&&Rule| app_only(r) && r.schedule.is_none();
                 let block_rule = scoped
                     .iter()
-                    .find(|r| app_only(r) && matches!(r.action, Action::Block { direction: Direction::Both }))
+                    .filter(one_click)
+                    .find(|r| matches!(r.action, Action::Block { direction: Direction::Both }))
                     .map(|r| r.id);
                 let limit_rule = scoped
                     .iter()
-                    .find(|r| app_only(r) && matches!(r.action, Action::Limit { .. }))
+                    .filter(one_click)
+                    .find(|r| matches!(r.action, Action::Limit { .. }))
                     .map(|r| r.id);
-                let quota_blocked = scoped.iter().any(|r| app_only(r) && self.exhausted.contains(&r.id));
+                let active = |r: &&&Rule| self.effective.get(r.id).is_some_and(|e| e.enabled);
+                let blocked = scoped.iter().filter(active).any(|r| {
+                    app_only(r)
+                        && (matches!(r.action, Action::Block { direction: Direction::Both })
+                            || self.exhausted.contains(&r.id))
+                });
                 AppView {
                     app: s.app.clone(),
                     name: s.name.clone(),
@@ -404,7 +345,7 @@ impl Engine {
                     rules: scoped.iter().map(|r| r.id).collect(),
                     block_rule,
                     limit_rule,
-                    blocked: block_rule.is_some() || quota_blocked,
+                    blocked,
                 }
             })
             .collect();
@@ -430,10 +371,13 @@ impl Engine {
                         return None;
                     }
                 }
-                let decision = self.rules.decide(&MatchCtx { conn, process }, &self.exhausted);
+                let decision = self.effective.decide(&MatchCtx { conn, process }, &self.exhausted);
                 let (rate_up, rate_down) = self.conn_rates.get(&conn.key).copied().unwrap_or((0, 0));
+                let remote_host =
+                    self.resolver.as_ref().zip(conn.key.remote).and_then(|(r, addr)| r.lookup(addr.ip()));
                 Some(ConnView {
                     conn: conn.clone(),
+                    remote_host,
                     name: app_id.as_ref().map(|a| a.display_name().to_string()),
                     app: app_id,
                     rate_up,
@@ -565,6 +509,39 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_rules_and_quota_warning() {
+        let mut e = Engine::new(temp_store("schedule"), 10).unwrap();
+        // 2026-10-12 is a Monday.
+        e.add_rule(
+            serde_json::from_str(
+                r#"{"match":{"app":"steam"},"action":{"type":"block"},"schedule":{"days":["mon"],"from":"09:00","until":"13:00"}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        e.ingest(snap(0, 0, 0), at(12)); // Monday 12:00: inside the window
+        assert!(e.apps()[0].blocked);
+        assert_eq!(e.apps()[0].block_rule, None, "scheduled rules are not one-click toggles");
+        assert_eq!(e.policy().rules.enabled().count(), 1);
+        e.ingest(snap(1000, 0, 0), Local.with_ymd_and_hms(2026, 10, 12, 14, 0, 0).unwrap());
+        assert!(!e.apps()[0].blocked);
+        assert_eq!(e.policy().rules.enabled().count(), 0);
+
+        e.add_rule(
+            serde_json::from_str(
+                r#"{"match":{"app":"steam"},"action":{"type":"quota","limit":1000,"period":"day"}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        e.ingest(snap(2000, 0, 850), at(12));
+        e.ingest(snap(3000, 0, 900), at(12));
+        let warnings =
+            e.events_since(0).iter().filter(|ev| matches!(ev.kind, EventKind::QuotaWarning { .. })).count();
+        assert_eq!(warnings, 1, "warned once per period");
+    }
+
+    #[test]
     fn usage_rates_and_app_rules() {
         let mut e = Engine::new(temp_store("usage"), 10).unwrap();
         e.ingest(snap(0, 0, 0), at(12));
@@ -597,11 +574,13 @@ mod tests {
         let mut e = Engine::new(store, 10).unwrap();
         e.ingest(snap(0, 0, 0), at(12));
         assert!(!e.events_since(0).iter().any(|ev| matches!(ev.kind, EventKind::NewApp { .. })));
+        let before_restart = e.overview().last_event;
         e.add_rule(serde_json::from_str(r#"{"name":"x","action":{"type":"allow"}}"#).unwrap()).unwrap();
         e.save().unwrap();
 
         let mut e = Engine::new(Store::open(dir.clone()).unwrap(), 10).unwrap();
         assert_eq!(e.rules.rules.len(), 1);
+        assert!(e.overview().last_event >= before_restart, "event ids never go backwards");
         let mut s = snap(0, 0, 0);
         s.processes.insert(
             10,

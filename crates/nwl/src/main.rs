@@ -3,6 +3,7 @@
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand, ValueEnum};
 use nwl_core::rate::{format_bytes, ByteSize, Rate};
+use nwl_core::rules::{Day, Rule, TimeOfDay};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -43,6 +44,39 @@ enum Per {
     Month,
 }
 
+/// When a rule applies. Without any of these it always applies.
+#[derive(clap::Args)]
+struct When {
+    /// Days the rule is active: `mon,tue,...`, `weekdays` or `weekends`.
+    #[arg(long, value_delimiter = ',')]
+    days: Vec<String>,
+    /// Start of the daily window, `HH:MM` (needs --until).
+    #[arg(long, requires = "until")]
+    from: Option<TimeOfDay>,
+    /// End of the daily window, `HH:MM`; before --from means overnight.
+    #[arg(long, requires = "from")]
+    until: Option<TimeOfDay>,
+}
+
+impl When {
+    fn schedule(&self) -> anyhow::Result<Value> {
+        let mut days = Vec::new();
+        for d in &self.days {
+            match d.to_ascii_lowercase().as_str() {
+                "weekdays" => days.extend(&Day::ALL[..5]),
+                "weekends" => days.extend(&Day::ALL[5..]),
+                other => days.push(other.parse::<Day>().map_err(anyhow::Error::msg)?),
+            }
+        }
+        if days.is_empty() && self.from.is_none() {
+            return Ok(Value::Null);
+        }
+        days.sort();
+        days.dedup();
+        Ok(json!({"days": days, "from": self.from, "until": self.until}))
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Daemon and enforcement status.
@@ -72,6 +106,8 @@ enum Cmd {
         app: String,
         #[arg(long, value_enum, default_value_t = Dir::Both)]
         direction: Dir,
+        #[command(flatten)]
+        when: When,
     },
     /// Limit an application's bandwidth, e.g. `nwl limit steam --down 5MB/s`.
     Limit {
@@ -82,6 +118,8 @@ enum Cmd {
         /// Upload limit.
         #[arg(long)]
         up: Option<Rate>,
+        #[command(flatten)]
+        when: When,
     },
     /// Cap an application's data per period, e.g. `nwl quota steam 50GB --per month`.
     Quota {
@@ -92,6 +130,8 @@ enum Cmd {
         /// Which traffic counts against the quota.
         #[arg(long, value_enum, default_value_t = Dir::Both)]
         direction: Dir,
+        #[command(flatten)]
+        when: When,
     },
     /// Add a rule from JSON, e.g. `nwl add '{"match":{"remote":["10.0.0.0/8"]},"action":{"type":"block"}}'`.
     Add { json: String },
@@ -184,40 +224,19 @@ fn table(headers: &[&str], rows: &[Vec<String>], right: &[usize]) {
 }
 
 fn describe_rule(r: &Value) -> String {
-    let m = &r["match"];
-    let a = &r["action"];
-    let mut scope = vec![m["app"].as_str().map_or("all apps".to_string(), |s| format!("app {s}"))];
-    if let Some(p) = m["protocol"].as_str() {
-        scope.push(p.to_uppercase());
+    match serde_json::from_value::<Rule>(r.clone()) {
+        Ok(rule) => format!("{} · {}", rule.action_summary(), rule.scope_summary()),
+        Err(_) => r.to_string(),
     }
-    if let Some(nets) = m["remote"].as_array() {
-        scope.push(format!("to {}", nets.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")));
+}
+
+/// Adds `schedule` to a rule when one was given.
+fn with_schedule(mut rule: Value, when: &When) -> anyhow::Result<Value> {
+    let schedule = when.schedule()?;
+    if !schedule.is_null() {
+        rule["schedule"] = schedule;
     }
-    if let Some(ports) = m["remote_ports"].as_array() {
-        scope.push(format!(
-            "port {}",
-            ports.iter().map(|p| p.to_string().replace('"', "")).collect::<Vec<_>>().join(",")
-        ));
-    }
-    let action = match a["type"].as_str().unwrap_or("") {
-        "allow" => "allow".to_string(),
-        "block" => format!("block {}", a["direction"].as_str().unwrap_or("both")),
-        "limit" => {
-            let mut s = "limit".to_string();
-            if !a["download"].is_null() {
-                s += &format!(" down {}", rate(&a["download"]));
-            }
-            if !a["upload"].is_null() {
-                s += &format!(" up {}", rate(&a["upload"]));
-            }
-            s
-        }
-        "quota" => {
-            format!("quota {} per {}", format_bytes(u(&a["limit"])), a["period"].as_str().unwrap_or("?"))
-        }
-        other => other.to_string(),
-    };
-    format!("{action} · {}", scope.join(" · "))
+    Ok(rule)
 }
 
 fn print_top(c: &Client, limit: usize) -> anyhow::Result<()> {
@@ -355,6 +374,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         x["key"]["protocol"].as_str().unwrap_or("").to_string(),
                         x["key"]["local"].as_str().unwrap_or("").to_string(),
                         x["key"]["remote"].as_str().unwrap_or("*").to_string(),
+                        x["remote_host"].as_str().unwrap_or("").to_string(),
                         x["state"].as_str().unwrap_or("").to_string(),
                         rate(&x["rate_down"]),
                         rate(&x["rate_up"]),
@@ -364,9 +384,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 })
                 .collect();
             table(
-                &["APP", "PID", "PROTO", "LOCAL", "REMOTE", "STATE", "DOWN", "UP", "RTT", "POLICY"],
+                &["APP", "PID", "PROTO", "LOCAL", "REMOTE", "HOST", "STATE", "DOWN", "UP", "RTT", "POLICY"],
                 &rows,
-                &[1, 6, 7, 8],
+                &[1, 7, 8, 9],
             );
         }
         Cmd::Rules if cli.json => raw("/api/rules")?,
@@ -391,20 +411,26 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 table(&["ID", "", "NAME", "RULE"], &rows, &[]);
             }
         }
-        Cmd::Block { app, direction } => add_rule(
+        Cmd::Block { app, direction, when } => add_rule(
             &c,
-            json!({"name": format!("Block {app}"), "match": {"app": app}, "action": {"type": "block", "direction": direction.as_str()}}),
+            with_schedule(
+                json!({"name": format!("Block {app}"), "match": {"app": app}, "action": {"type": "block", "direction": direction.as_str()}}),
+                &when,
+            )?,
         )?,
-        Cmd::Limit { app, down, up } => {
+        Cmd::Limit { app, down, up, when } => {
             if down.is_none() && up.is_none() {
                 bail!("give --down and/or --up");
             }
             add_rule(
                 &c,
-                json!({"name": format!("Limit {app}"), "match": {"app": app}, "action": {"type": "limit", "download": down.map(|r| r.0), "upload": up.map(|r| r.0)}}),
+                with_schedule(
+                    json!({"name": format!("Limit {app}"), "match": {"app": app}, "action": {"type": "limit", "download": down.map(|r| r.0), "upload": up.map(|r| r.0)}}),
+                    &when,
+                )?,
             )?
         }
-        Cmd::Quota { app, limit, per, direction } => {
+        Cmd::Quota { app, limit, per, direction, when } => {
             let period = match per {
                 Per::Day => "day",
                 Per::Week => "week",
@@ -412,7 +438,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             };
             add_rule(
                 &c,
-                json!({"name": format!("{app} {limit} per {period}"), "match": {"app": app}, "action": {"type": "quota", "limit": limit.0, "period": period, "direction": direction.as_str()}}),
+                with_schedule(
+                    json!({"name": format!("{app} {limit} per {period}"), "match": {"app": app}, "action": {"type": "quota", "limit": limit.0, "period": period, "direction": direction.as_str()}}),
+                    &when,
+                )?,
             )?
         }
         Cmd::Add { json } => {

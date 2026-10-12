@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NattoWok Limiter
+GenericName=Network Monitor and Limiter
+Comment=See which apps use your network, then block, limit or cap them
+Exec=nattowok
+Terminal=false
+Categories=Network;Monitor;System;
+Keywords=bandwidth;firewall;limit;traffic;netlimiter;

@@ -255,6 +255,25 @@ impl Monitor for SimulatedMonitor {
     }
 }
 
+/// Host names for the simulated remote addresses (stands in for reverse DNS
+/// in demo mode, so the demo works offline).
+pub fn demo_hostname(ip: std::net::IpAddr) -> Option<String> {
+    let name = match ip.to_string().as_str() {
+        "142.250.74.78" => "fra24s06-in-f14.1e100.net",
+        "151.101.1.140" => "reddit.map.fastly.net",
+        "2a00:1450:4001:82b::200e" => "fra16s48-in-x0e.1e100.net",
+        "23.62.226.10" => "a23-62-226-10.deploy.static.akamaitechnologies.com",
+        "155.133.248.39" => "ext1-fra1.steamserver.net",
+        "162.159.135.234" => "discord.com",
+        "35.214.203.66" => "66.203.214.35.bc.googleusercontent.com",
+        "35.186.224.25" => "25.224.186.35.bc.googleusercontent.com",
+        "162.125.19.131" => "edge-block-www-env.dropbox-dns.com",
+        "1.1.1.1" => "one.one.one.one",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
 fn to_conn(c: &SimConn, rtt_us: Option<u32>) -> Connection {
     Connection {
         key: c.key.clone(),

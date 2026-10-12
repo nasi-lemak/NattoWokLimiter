@@ -2,6 +2,7 @@
 
 mod api;
 mod engine;
+mod resolver;
 mod store;
 
 use anyhow::{bail, Context};
@@ -39,6 +40,9 @@ struct Args {
     /// Also count and police loopback (localhost) traffic.
     #[arg(long)]
     include_loopback: bool,
+    /// Don't look up host names of remote addresses (reverse DNS).
+    #[arg(long)]
+    no_resolve: bool,
 }
 
 /// The monitor, the enforcer, and a warning when enforcement had to be disabled.
@@ -155,6 +159,10 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("opening state directory {}", state_dir.display()))?;
     let mut engine = Engine::new(store, args.history)?;
     engine.set_count_loopback(args.include_loopback);
+    if !args.no_resolve {
+        let lookup = if args.demo { nwl_platform::sim::demo_hostname } else { resolver::system_lookup };
+        engine.set_resolver(resolver::Resolver::new(4, lookup));
+    }
 
     let (monitor, enforcer, warning) = backends(&args)?;
     engine.status.monitor = monitor.name().to_string();

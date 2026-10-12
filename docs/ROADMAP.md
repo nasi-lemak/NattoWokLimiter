@@ -24,17 +24,18 @@ trade-offs stay visible.
 
 - **Ask mode.** Hold the first connection of an unknown app and prompt "allow once / always / block"
   (GlassWire and OpenSnitch style). On Linux that's NFQUEUE or eBPF.
-- **Hostnames.** Snoop DNS answers so the UI shows `api.example.com`, not just an IP, and rules can
-  match domains (`*.doubleclick.net`).
+- **Domain names from DNS answers.** Reverse DNS is done (the UI shows PTR names), but PTR names are
+  often CDN hosts. Snooping the app's own DNS answers would show the name it actually asked for
+  (`api.example.com`), and would let rules match domains (`*.doubleclick.net`).
 - **GeoIP and ASN** for connection details and rules ("block this app outside my country").
-- **Schedules and profiles.** Rules active on weekdays 9–17, or a "metered connection" profile that
-  switches automatically per network (SSID or gateway MAC).
+- **Profiles.** Schedules are done (rules active on chosen days and times). Next: rule sets that
+  switch automatically per network, e.g. a "metered connection" profile keyed by SSID or gateway MAC.
 - **Per-connection actions** from the connection list: kill, block remote, limit.
 
 ## Insight
 
-- **Alerts.** Bandwidth spikes, quota at 80%/100%, an app first seen, a changed binary hash. Delivered
-  as desktop notifications and webhooks.
+- **Alerts.** Quota at 80% and 100% and "app first seen" are events today. Add bandwidth spikes and
+  changed binary hashes, delivered as desktop notifications and webhooks.
 - **Long-term graphs.** Hourly resolution, per app and per remote, with CSV/JSON export.
 - **"Who is this app talking to?"** Top remotes per app with bytes, ASN and country.
 - **Binary identity.** Hash and code-signature checks so a rule for `firefox` doesn't follow a
@@ -42,7 +43,8 @@ trade-offs stay visible.
 
 ## Product
 
-- **Native desktop app and tray icon** (Tauri) over the same API, plus a live speed meter in the tray.
+- **Tray icon** for the desktop app (done: `nattowok`, native Rust/egui), with a live speed meter and
+  quick block/limit, plus desktop notifications for events.
 - **Remote management** with authentication (token or mTLS), and several machines in one dashboard.
 - **Packages**: deb/rpm/AUR, MSI with a service installer, Homebrew.
 - **Config import** from NetLimiter and GlassWire rule exports, where feasible.

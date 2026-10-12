@@ -22,7 +22,7 @@ jobs:
       - name: Real-kernel enforcement test
         run: |
           sudo apt-get install -y nftables
-          sudo -E env "PATH=$PATH" cargo test -p nwl-platform --test linux_enforce -- --ignored --test-threads=1 --nocapture
+          sudo -E env "PATH=$PATH" NWL_E2E=1 cargo test -p nwl-platform --test linux_enforce
 
   windows:
     runs-on: windows-latest

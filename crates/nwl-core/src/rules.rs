@@ -33,6 +33,116 @@ pub struct Rule {
     #[serde(default, rename = "match")]
     pub matcher: Matcher,
     pub action: Action,
+    /// When set, the rule only applies inside this weekly time window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Schedule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Day {
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
+}
+
+impl Day {
+    pub const ALL: [Day; 7] = [Day::Mon, Day::Tue, Day::Wed, Day::Thu, Day::Fri, Day::Sat, Day::Sun];
+
+    /// 0 = Monday.
+    pub fn from_index(i: usize) -> Day {
+        Day::ALL[i % 7]
+    }
+
+    pub fn prev(self) -> Day {
+        Day::from_index(self as usize + 6)
+    }
+}
+
+impl FromStr for Day {
+    type Err = String;
+    /// Accepts `mon`, `Monday`, `TUE`, ...
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let lower = s.trim().to_ascii_lowercase();
+        const NAMES: [&str; 7] =
+            ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+        NAMES
+            .iter()
+            .position(|n| lower.len() >= 3 && n.starts_with(&lower))
+            .map(Day::from_index)
+            .ok_or_else(|| format!("invalid day `{s}`"))
+    }
+}
+
+/// Minutes since local midnight, written `HH:MM`; `24:00` is the end of day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TimeOfDay(pub u16);
+
+impl FromStr for TimeOfDay {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = || format!("invalid time `{s}`, expected HH:MM");
+        let (h, m) = s.trim().split_once(':').ok_or_else(err)?;
+        let (h, m): (u16, u16) = (h.parse().map_err(|_| err())?, m.parse().map_err(|_| err())?);
+        if m >= 60 || h > 24 || (h == 24 && m != 0) {
+            return Err(err());
+        }
+        Ok(TimeOfDay(h * 60 + m))
+    }
+}
+
+impl fmt::Display for TimeOfDay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02}:{:02}", self.0 / 60, self.0 % 60)
+    }
+}
+
+impl Serialize for TimeOfDay {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeOfDay {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// A weekly window, e.g. weekdays 09:00–17:00. A window whose end is before
+/// its start runs overnight (22:00–06:00), and `days` then names the day it
+/// starts on. Empty `days` means every day; missing times mean all day.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Schedule {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub days: Vec<Day>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<TimeOfDay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<TimeOfDay>,
+}
+
+impl Schedule {
+    fn on(&self, day: Day) -> bool {
+        self.days.is_empty() || self.days.contains(&day)
+    }
+
+    /// Whether the window covers `minute` (since midnight) on `day`.
+    pub fn active(&self, day: Day, minute: u16) -> bool {
+        let from = self.from.map_or(0, |t| t.0);
+        let until = self.until.map_or(24 * 60, |t| t.0);
+        match from.cmp(&until) {
+            std::cmp::Ordering::Less => self.on(day) && (from..until).contains(&minute),
+            std::cmp::Ordering::Equal => self.on(day),
+            std::cmp::Ordering::Greater => {
+                (minute >= from && self.on(day)) || (minute < until && self.on(day.prev()))
+            }
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -277,6 +387,84 @@ pub fn glob_match(pattern: &str, text: &str, case_insensitive: bool) -> bool {
     p[pi..].iter().all(|&c| c == '*')
 }
 
+impl fmt::Display for Schedule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        let mut days: Vec<Day> = self.days.clone();
+        days.sort();
+        days.dedup();
+        match days.as_slice() {
+            [] => f.write_str("daily")?,
+            d if d == &Day::ALL[..5] => f.write_str("weekdays")?,
+            d if d == &Day::ALL[5..] => f.write_str("weekends")?,
+            d => f.write_str(&d.iter().map(|d| names[*d as usize]).collect::<Vec<_>>().join(","))?,
+        }
+        if let (Some(from), Some(until)) = (self.from, self.until) {
+            write!(f, " {from}-{until}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Rule {
+    /// What the rule does, e.g. `limit down 1.00 MB/s`.
+    pub fn action_summary(&self) -> String {
+        let dir = |d: Direction| match d {
+            Direction::In => " incoming",
+            Direction::Out => " outgoing",
+            Direction::Both => "",
+        };
+        match &self.action {
+            Action::Allow => "allow".into(),
+            Action::Block { direction } => format!("block{}", dir(*direction)),
+            Action::Limit { download, upload } => {
+                let mut s = "limit".to_string();
+                if let Some(r) = download {
+                    s += &format!(" down {r}");
+                }
+                if let Some(r) = upload {
+                    s += &format!(" up {r}");
+                }
+                s
+            }
+            Action::Quota { limit, period, direction } => {
+                let period = match period {
+                    Period::Day => "day",
+                    Period::Week => "week",
+                    Period::Month => "month",
+                };
+                format!("quota {limit} per {period}{}", dir(*direction))
+            }
+        }
+    }
+
+    /// What the rule applies to, e.g. `app steam · TCP · port 443 · weekdays 09:00-17:00`.
+    pub fn scope_summary(&self) -> String {
+        let m = &self.matcher;
+        let mut parts = vec![m.app.as_ref().map_or("all apps".to_string(), |a| format!("app {}", a.0))];
+        if let Some(p) = m.protocol {
+            parts.push(p.to_string().to_uppercase());
+        }
+        let join = |items: Vec<String>| items.join(",");
+        if !m.remote.is_empty() {
+            parts.push(format!("to {}", join(m.remote.iter().map(|n| n.to_string()).collect())));
+        }
+        if !m.remote_ports.is_empty() {
+            parts.push(format!("port {}", join(m.remote_ports.iter().map(|p| p.to_string()).collect())));
+        }
+        if !m.local_ports.is_empty() {
+            parts.push(format!("local port {}", join(m.local_ports.iter().map(|p| p.to_string()).collect())));
+        }
+        if let Some(uid) = m.uid {
+            parts.push(format!("uid {uid}"));
+        }
+        if let Some(s) = &self.schedule {
+            parts.push(s.to_string());
+        }
+        parts.join(" · ")
+    }
+}
+
 /// Outcome of evaluating the rule set against one socket.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Decision {
@@ -348,6 +536,19 @@ impl RuleSet {
         self.rules.iter().filter(|r| r.enabled)
     }
 
+    /// The rules in effect at a local time: rules whose schedule does not
+    /// cover it are disabled. Everything downstream (decisions, quotas,
+    /// enforcement) works on this view.
+    pub fn effective_at(&self, day: Day, minute: u16) -> RuleSet {
+        let mut set = self.clone();
+        for rule in &mut set.rules {
+            if let Some(schedule) = &rule.schedule {
+                rule.enabled &= schedule.active(day, minute);
+            }
+        }
+        set
+    }
+
     /// Evaluates the rules against one socket. `exhausted_quotas` lists quota
     /// rules whose cap has been reached in the current period; they block.
     pub fn decide(&self, ctx: &MatchCtx<'_>, exhausted_quotas: &[RuleId]) -> Decision {
@@ -388,6 +589,9 @@ fn validate(rule: &Rule) -> Result<(), RuleError> {
         Action::Quota { limit, .. } if limit.0 == 0 => invalid("a quota must be larger than 0"),
         Action::Quota { .. } if rule.matcher.app.is_none() && rule.matcher.remote.is_empty() => {
             invalid("a quota must be scoped to an app or remote network")
+        }
+        _ if rule.schedule.as_ref().is_some_and(|s| s.from.is_some() != s.until.is_some()) => {
+            invalid("a schedule needs both `from` and `until`, or neither")
         }
         _ => Ok(()),
     }
@@ -534,6 +738,65 @@ mod tests {
         assert_eq!(set.add(rule(r#"{"action":{"type":"allow"}}"#)).unwrap(), 9);
         set.remove(8).unwrap();
         assert_eq!(set.remove(8), Err(RuleError::NotFound(8)));
+    }
+
+    #[test]
+    fn schedules() {
+        let s: Schedule =
+            serde_json::from_str(r#"{"days":["mon","tue"],"from":"09:00","until":"17:30"}"#).unwrap();
+        assert!(s.active(Day::Mon, 9 * 60));
+        assert!(s.active(Day::Tue, 17 * 60 + 29));
+        assert!(!s.active(Day::Tue, 17 * 60 + 30));
+        assert!(!s.active(Day::Wed, 12 * 60));
+        assert!(!s.active(Day::Mon, 8 * 60 + 59));
+
+        // Overnight, starting Friday: covers Fri 23:00 and Sat 05:00, not Fri 05:00.
+        let night: Schedule =
+            serde_json::from_str(r#"{"days":["fri"],"from":"22:00","until":"06:00"}"#).unwrap();
+        assert!(night.active(Day::Fri, 23 * 60));
+        assert!(night.active(Day::Sat, 5 * 60));
+        assert!(!night.active(Day::Fri, 5 * 60));
+        assert!(!night.active(Day::Sat, 23 * 60));
+
+        let weekend: Schedule = serde_json::from_str(r#"{"days":["sat","sun"]}"#).unwrap();
+        assert!(weekend.active(Day::Sun, 0) && !weekend.active(Day::Mon, 600));
+        assert_eq!(Day::Mon.prev(), Day::Sun);
+        assert_eq!("Wednesday".parse::<Day>(), Ok(Day::Wed));
+        assert_eq!("sat".parse::<Day>(), Ok(Day::Sat));
+        assert!("su".parse::<Day>().is_err() && "funday".parse::<Day>().is_err());
+
+        assert_eq!("24:00".parse::<TimeOfDay>().unwrap().0, 1440);
+        for bad in ["24:01", "9", "09:60", "ab:cd"] {
+            assert!(bad.parse::<TimeOfDay>().is_err(), "{bad}");
+        }
+        assert_eq!(serde_json::to_string(&TimeOfDay(9 * 60 + 5)).unwrap(), r#""09:05""#);
+    }
+
+    #[test]
+    fn summaries() {
+        let r = rule(
+            r#"{"match":{"app":"steam","protocol":"tcp","remote_ports":[443,"27000-27100"]},"action":{"type":"limit","download":"1MB/s"},"schedule":{"days":["fri","mon","tue","wed","thu"],"from":"09:00","until":"17:00"}}"#,
+        );
+        assert_eq!(r.action_summary(), "limit down 1.00 MB/s");
+        assert_eq!(r.scope_summary(), "app steam · TCP · port 443,27000-27100 · weekdays 09:00-17:00");
+        let q = rule(
+            r#"{"action":{"type":"quota","limit":"20GB","period":"month","direction":"in"},"match":{"remote":["10.0.0.0/8"]},"schedule":{"days":["sat"]}}"#,
+        );
+        assert_eq!(q.action_summary(), "quota 20.00 GB per month incoming");
+        assert_eq!(q.scope_summary(), "all apps · to 10.0.0.0/8 · Sat");
+    }
+
+    #[test]
+    fn effective_rules_follow_schedules() {
+        let set = RuleSet::new(vec![rule(
+            r#"{"match":{"app":"steam"},"action":{"type":"block"},"schedule":{"days":["mon"],"from":"09:00","until":"17:00"}}"#,
+        )])
+        .unwrap();
+        assert_eq!(set.effective_at(Day::Mon, 600).enabled().count(), 1);
+        assert_eq!(set.effective_at(Day::Mon, 1200).enabled().count(), 0);
+        assert!(set.rules[0].enabled, "the stored rule is untouched");
+        let half = r#"{"action":{"type":"allow"},"schedule":{"from":"09:00"}}"#;
+        assert!(RuleSet::default().add(rule(half)).is_err());
     }
 
     #[test]

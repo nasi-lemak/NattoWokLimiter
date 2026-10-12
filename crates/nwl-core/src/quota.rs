@@ -20,7 +20,7 @@ pub struct QuotaTracker {
 }
 
 /// Status of one quota rule, for display.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct QuotaStatus {
     pub rule: RuleId,
     pub period: Period,

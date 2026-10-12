@@ -110,12 +110,11 @@ impl AppState {
 }
 
 async fn status(State(s): State<AppState>) -> impl IntoResponse {
-    let e = s.engine();
-    Json(json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "uptime_secs": s.started.elapsed().as_secs(),
-        "enforcement": e.status,
-    }))
+    Json(nwl_core::api::Status {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: s.started.elapsed().as_secs(),
+        enforcement: s.engine().status.clone(),
+    })
 }
 
 async fn overview(State(s): State<AppState>) -> impl IntoResponse {
@@ -321,6 +320,22 @@ mod tests {
 
         let (_, events) = call(&app, "GET", "/api/events", "localhost", false, "").await;
         assert_eq!(events.as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn responses_match_shared_api_types() {
+        let (app, _) = app();
+        let (_, status) = call(&app, "GET", "/api/status", "localhost", false, "").await;
+        serde_json::from_value::<nwl_core::api::Status>(status).unwrap();
+        let (_, overview) = call(&app, "GET", "/api/overview", "localhost", false, "").await;
+        serde_json::from_value::<nwl_core::api::Overview>(overview).unwrap();
+        let (_, conns) = call(&app, "GET", "/api/connections", "localhost", false, "").await;
+        serde_json::from_value::<Vec<nwl_core::api::ConnView>>(conns).unwrap();
+        let rule = r#"{"name":"r","match":{"app":"x"},"action":{"type":"block"}}"#;
+        call(&app, "POST", "/api/rules", "localhost", true, rule).await;
+        let (_, events) = call(&app, "GET", "/api/events", "localhost", false, "").await;
+        let events: Vec<nwl_core::api::Event> = serde_json::from_value(events).unwrap();
+        assert!(matches!(events[0].kind, nwl_core::api::EventKind::RuleAdded { rule: 1, .. }));
     }
 
     #[tokio::test]

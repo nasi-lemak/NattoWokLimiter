@@ -25,3 +25,10 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 serde_json.workspace = true
+
+# Runs against the real kernel; needs root, nftables and cgroup v2. It is
+# skipped unless NWL_E2E=1. Custom harness so the test binary can re-run
+# itself as the throttled client application.
+[[test]]
+name = "linux_enforce"
+harness = false

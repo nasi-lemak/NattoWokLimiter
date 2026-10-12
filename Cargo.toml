@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/nwl-core", "crates/nwl-platform", "crates/nwld", "crates/nwl"]
+members = ["crates/nwl-core", "crates/nwl-platform", "crates/nwld", "crates/nwl", "crates/nwl-gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -27,4 +27,5 @@ ipnet = { version = "2", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = { version = "0.3", default-features = false }
+dns-lookup = "2"
 ureq = { version = "2", default-features = false, features = ["json"] }

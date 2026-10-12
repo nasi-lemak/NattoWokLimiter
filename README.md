@@ -3,7 +3,10 @@
 **See which apps use your network, then control them.** NattoWok Limiter is a per-application network
 monitor, firewall, bandwidth limiter and data-cap manager in the spirit of NetLimiter, NetBalancer
 and GlassWire. The goal is to beat all three: it's open, scriptable, cross-platform, and honest
-about what the OS can and can't do.
+about what the OS can and can't do. Everything, from the kernel backends to the desktop app, is
+written in Rust.
+
+![NattoWok Limiter desktop app](docs/screenshot.png)
 
 ```
 $ nwl top
@@ -17,12 +20,18 @@ dropbox           -           -   28.10 MB      1  blocked  /home/me/.dropbox-di
 
 $ nwl limit steam --down 1MB/s
 $ nwl block dropbox
+$ nwl block steam --days weekdays --from 09:00 --until 17:00
 $ nwl quota spotify 2GB --per month
 ```
 
-It also has a live web dashboard (served by the daemon at <http://127.0.0.1:7657>) with a traffic graph,
-per-app sparklines, one-click block and limit, a connection inspector with RTT, a rules editor, data
-usage history and an event log.
+There are three front ends over the same daemon:
+
+* **`nattowok`**, the native desktop app (Rust, egui): live traffic graph, per-app sparklines,
+  one-click block and limit, a connection inspector with host names and RTT, a rules editor with
+  schedules, data usage history and an event log.
+* **The web dashboard**, served by the daemon at <http://127.0.0.1:7657>, with the same views and no
+  install.
+* **`nwl`**, the CLI, for scripts and terminals.
 
 ## What it does today
 
@@ -32,10 +41,12 @@ usage history and an event log.
 | Connection list: owner, state, rates, RTT, which rule applies | ✅ | ✅ (no RTT yet) |
 | Block an app / network / port (in, out or both) | ✅ nftables | ✅ Windows Firewall |
 | Bandwidth limits per app or network, download **and** upload | ✅ nftables policing | ⚠️ upload only (QoS policy) |
-| Data quotas per day/week/month, auto-block when reached | ✅ | ✅ |
+| Data quotas per day/week/month, warning at 80%, auto-block when reached | ✅ | ✅ |
+| Schedules: rules active on chosen days and times (overnight windows too) | ✅ | ✅ |
+| Host names of remote addresses (reverse DNS, cached, in the background) | ✅ | ✅ |
 | Usage history per app per day (400 days) | ✅ | ✅ |
 | "New app used the network" events | ✅ | ✅ |
-| Web dashboard, REST API, live stream, CLI | ✅ | ✅ |
+| Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
 
 Rules are evaluated predictably (see [rules](#rules)), and when a backend can't express a rule exactly
 it **reports a warning in the UI** instead of silently doing something else.
@@ -55,7 +66,7 @@ cargo build --release
 
 # Try it without touching your system: simulated apps that obey your rules.
 ./target/release/nwld --demo
-# open http://127.0.0.1:7657
+./target/release/nattowok        # desktop app, or open http://127.0.0.1:7657
 
 # Real system (Linux): monitor + enforce
 sudo ./target/release/nwld
@@ -67,7 +78,7 @@ On Windows, run `nwld.exe` from an elevated prompt. Without elevation it still m
 but per-connection byte counters and enforcement need Administrator.
 
 Install as a service on Linux: copy the binaries to `/usr/local/bin` and use
-[`packaging/nwld.service`](packaging/nwld.service).
+[`packaging/nwld.service`](packaging/nwld.service); [`packaging/nattowok.desktop`](packaging/nattowok.desktop) adds the desktop app to the application menu.
 
 ### CLI
 
@@ -76,9 +87,10 @@ nwl status                       daemon and enforcement status
 nwl top [-w]                     apps by current traffic (-w to watch)
 nwl conns [--app PATH] [-a]      sockets with owner, rates, RTT, policy
 nwl rules                        rules in evaluation order
-nwl block APP [--direction in|out|both]
-nwl limit APP [--down RATE] [--up RATE]
-nwl quota APP SIZE [--per day|week|month] [--direction in|out|both]
+nwl block APP [--direction in|out|both]          [WHEN]
+nwl limit APP [--down RATE] [--up RATE]          [WHEN]
+nwl quota APP SIZE [--per day|week|month] [--direction in|out|both] [WHEN]
+      WHEN: --days mon,tue,…|weekdays|weekends  --from HH:MM --until HH:MM
 nwl add '<rule json>'            any rule, see below
 nwl rm ID | enable ID | disable ID
 nwl usage [--days N]             data used per app
@@ -107,7 +119,8 @@ managed through the UI, CLI or API.
     "local_ports": [],
     "uid": 1000
   },
-  "action": { "type": "limit", "download": "5MB/s", "upload": "1MB/s" }
+  "action": { "type": "limit", "download": "5MB/s", "upload": "1MB/s" },
+  "schedule": { "days": ["mon", "tue", "wed", "thu", "fri"], "from": "09:00", "until": "17:00" }
 }
 ```
 
@@ -121,6 +134,11 @@ Every `match` field is optional, and an empty match covers all traffic. Actions:
 * `{"type": "quota", "limit": SIZE, "period": "day" | "week" | "month", "direction": ...}` counts the
   traffic it matches in local calendar periods. Once the cap is reached, that traffic is blocked until
   the next period.
+
+A `schedule` makes a rule apply only inside a weekly window, in local time. Without `days` it applies
+every day; without `from`/`until` it applies all day. A window that ends before it starts runs
+overnight (`22:00`–`06:00`), and `days` then names the day it starts on. Outside its window a rule
+behaves as if disabled: a scheduled quota doesn't count traffic and doesn't block.
 
 Localhost traffic is never counted or policed unless the daemon runs with `--include-loopback`. It
 never reaches your ISP, and throttling it breaks local apps.
@@ -136,11 +154,12 @@ never reaches your ISP, and throttling it breaks local apps.
              │      REST + SSE API, web dashboard        │
              └─────────────────┬─────────────────────────┘
                                │ http://127.0.0.1:7657
-                 browser ──────┴────── nwl (CLI)
+         nattowok (desktop) ───┼─── browser ─── nwl (CLI)
 ```
 
-* **`nwl-core`**: platform-independent data model, rule engine, accounting (rates, totals, history),
-  quotas, and size/rate parsing. No I/O.
+* **`nwl-core`**: platform-independent data model, rule engine with schedules, accounting (rates,
+  totals, history), quotas, size/rate parsing, and the API types shared by the daemon and every
+  client. No I/O.
 * **`nwl-platform`**: the OS backends, each a `Monitor` (observe) plus an `Enforcer` (apply rules):
   * **Linux**: sockets come from `NETLINK_SOCK_DIAG` with `tcp_info`, which gives exact per-socket
     byte counters and RTT without eBPF. Owners are resolved via `/proc/<pid>/fd`. To enforce,
@@ -152,8 +171,11 @@ never reaches your ISP, and throttling it breaks local apps.
     policies, installed by one PowerShell script and grouped under `NattoWokLimiter`.
   * **Simulated**: demo apps and traffic that obey the installed rules, for trying things out and
     developing the UI.
-* **`nwld`**: the daemon. It runs the sampling loop, persists state, and serves the API and dashboard.
-  When it stops, it removes everything it installed.
+* **`nwld`**: the daemon. It runs the sampling loop, persists state, resolves host names in the
+  background, and serves the API and dashboard. When it stops, it removes everything it installed.
+* **`nwl-gui`** (binary `nattowok`): the desktop app. It polls the API on a background thread, so the
+  UI never waits on the network, and table rows hold still while the pointer is over them so buttons
+  don't move under the cursor.
 * **`nwl`**: the CLI.
 
 The API listens on loopback only. It rejects requests whose `Host` isn't a loopback name (to stop DNS
@@ -200,8 +222,13 @@ tray icon.
 
 ```sh
 cargo test                       # unit + API tests, no privileges needed
-sudo -E cargo test -p nwl-platform --test linux_enforce -- --ignored   # real-kernel enforcement test
+sudo -E NWL_E2E=1 cargo test -p nwl-platform --test linux_enforce      # real-kernel enforcement test
 cargo clippy --all-targets
 cargo clippy --all-targets --target x86_64-pc-windows-msvc            # check the Windows backend from Linux
-cargo run -p nwld -- --demo      # dashboard with simulated traffic
+cargo run -p nwld -- --demo      # daemon with simulated traffic
+cargo run -p nwl-gui             # desktop app
+```
+
+The desktop app needs no system libraries to build. At runtime on Linux it uses the usual desktop
+libraries (OpenGL, `libxkbcommon`, X11 or Wayland), which every desktop distribution ships.
 ```

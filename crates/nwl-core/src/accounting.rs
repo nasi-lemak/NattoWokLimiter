@@ -58,7 +58,7 @@ pub struct ConnDelta {
     pub loopback: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
 pub struct SystemStats {
     /// Interface totals (all protocols, excluding loopback), bytes/s.
     pub rate_up: u64,
