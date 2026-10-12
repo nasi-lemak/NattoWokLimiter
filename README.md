@@ -45,6 +45,7 @@ There are three front ends over the same daemon:
 | Data quotas per day/week/month, warning at 80%, auto-block when reached | ✅ | ✅ |
 | Schedules: rules active on chosen days and times (overnight windows too) | ✅ | ✅ |
 | Host names of remote addresses (reverse DNS, cached, in the background) | ✅ | ✅ |
+| "Who is this app talking to?": remote hosts per app with bytes, ports, protocols | ✅ | ✅ |
 | Usage history per app per day (400 days) | ✅ | ✅ |
 | "New app used the network" events | ✅ | ✅ |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
@@ -95,6 +96,7 @@ nwl quota APP SIZE [--per day|week|month] [--direction in|out|both] [WHEN]
 nwl add '<rule json>'            any rule, see below
 nwl rm ID | enable ID | disable ID
 nwl usage [--days N]             data used per app
+nwl remotes [--app PATH] [-n N]  remote hosts by traffic, per app or overall
 nwl events
 ```
 
@@ -203,6 +205,7 @@ pages).
 | POST | `/api/rules/{id}/move` | `{"index": n}` reorder |
 | GET | `/api/quotas` | quota usage in the current period |
 | GET | `/api/usage?days=N` | per-app bytes per day |
+| GET | `/api/remotes?app=PATH&limit=N` | remote hosts by traffic this session, for one app or all |
 | GET | `/api/events?after=ID` | event log |
 | GET | `/api/stream` | Server-Sent Events, one `overview` per tick |
 

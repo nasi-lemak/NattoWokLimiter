@@ -6,9 +6,12 @@ use crate::resolver::Resolver;
 use crate::store::{KnownApps, Store, UsageDb};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use nwl_core::accounting::Accountant;
-use nwl_core::api::{AppView, ConnView, EnforcementStatus, Event, EventKind, Overview, UsageDay, UsageEntry};
+use nwl_core::api::{
+    AppView, ConnView, EnforcementStatus, Event, EventKind, Overview, RemoteView, UsageDay, UsageEntry,
+};
 use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapshot};
 use nwl_core::quota::{QuotaStatus, QuotaTracker};
+use nwl_core::remotes::{RemoteStats, RemoteTracker};
 use nwl_core::rules::{Action, Day, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
 use nwl_platform::{EnforceReport, Policy};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -23,6 +26,8 @@ pub struct Engine {
     /// Count localhost traffic in app statistics, usage and quotas.
     count_loopback: bool,
     resolver: Option<Resolver>,
+    /// Bytes per remote address per app, for this session.
+    remotes: RemoteTracker,
     store: Store,
     /// Rules as configured.
     pub rules: RuleSet,
@@ -93,6 +98,7 @@ impl Engine {
         Ok(Self {
             count_loopback: false,
             resolver: None,
+            remotes: RemoteTracker::new(1000),
             effective: rules.clone(),
             clock: None,
             warned: HashMap::new(),
@@ -172,6 +178,9 @@ impl Engine {
             }
             if let Some(app) = &d.app {
                 self.usage.record(&day, app, d.up, d.down);
+                if let Some(remote) = d.key.remote {
+                    self.remotes.record(app, remote, d.key.protocol, d.up, d.down, snap.mono_ms);
+                }
             }
             let Some(conn) = conns.get(&d.key) else { continue };
             let ctx = MatchCtx { conn, process: snap.process_of(conn) };
@@ -405,6 +414,51 @@ impl Engine {
         out
     }
 
+    /// Remote addresses by traffic: of one app (full path), or of all apps.
+    pub fn remotes(&self, app: Option<&str>, limit: usize) -> Vec<RemoteView> {
+        let canonical = |ip: std::net::IpAddr| match ip {
+            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(ip),
+            v4 => v4,
+        };
+        let open = |ip: std::net::IpAddr, app: Option<&AppId>| {
+            self.snapshot
+                .connections
+                .iter()
+                .filter(|c| !c.closed && c.key.remote.is_some_and(|r| canonical(r.ip()) == ip))
+                .filter(|c| app.is_none() || self.snapshot.process_of(c).map(|p| p.app_id()).as_ref() == app)
+                .count()
+        };
+        let view = |ip, s: &RemoteStats, apps: Vec<AppId>, app: Option<&AppId>| RemoteView {
+            ip,
+            host: self.resolver.as_ref().and_then(|r| r.lookup(ip)),
+            up: s.up,
+            down: s.down,
+            ports: s.ports.iter().copied().collect(),
+            protocols: s.protocols.iter().copied().collect(),
+            apps,
+            open_connections: open(ip, app),
+            idle_secs: self.snapshot.mono_ms.saturating_sub(s.last_seen_ms) / 1000,
+        };
+        match app {
+            Some(path) => {
+                let app = AppId(path.to_string());
+                self.remotes
+                    .of_app(&app)
+                    .into_iter()
+                    .take(limit)
+                    .map(|(ip, s)| view(ip, s, vec![], Some(&app)))
+                    .collect()
+            }
+            None => self
+                .remotes
+                .all()
+                .into_iter()
+                .take(limit)
+                .map(|(ip, s, apps)| view(ip, &s, apps, None))
+                .collect(),
+        }
+    }
+
     pub fn quota_status(&self) -> Vec<QuotaStatus> {
         let keys = &self.period_keys;
         self.quotas.status(&self.rules, |p| keys.get(period_name(p)).cloned().unwrap_or_default())
@@ -619,6 +673,20 @@ mod tests {
         assert_eq!(e.status.warnings, vec!["eBPF unavailable".to_string(), "rule 3: x".to_string()]);
         e.record_enforcement(Ok(EnforceReport::default()));
         assert_eq!(e.status.warnings, vec!["eBPF unavailable".to_string()]);
+    }
+
+    #[test]
+    fn remotes_per_app() {
+        let mut e = Engine::new(temp_store("remotes"), 10).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        e.ingest(snap(1000, 300, 2000), at(12));
+        let r = e.remotes(Some("/opt/steam/steam"), 10);
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].ip.to_string(), r[0].up, r[0].down), ("1.2.3.4".to_string(), 300, 2000));
+        assert_eq!((r[0].ports.clone(), r[0].open_connections, r[0].idle_secs), (vec![443], 1, 0));
+        let all = e.remotes(None, 10);
+        assert_eq!(all[0].apps, vec![AppId("/opt/steam/steam".into())]);
+        assert!(e.remotes(Some("/nope"), 10).is_empty());
     }
 
     #[test]

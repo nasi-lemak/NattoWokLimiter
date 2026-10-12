@@ -146,6 +146,15 @@ enum Cmd {
         #[arg(long, default_value_t = 7)]
         days: usize,
     },
+    /// Who apps talk to: remote hosts by traffic this session.
+    Remotes {
+        /// Only this application (full path, as shown by `top`).
+        #[arg(long)]
+        app: Option<String>,
+        /// Show at most this many hosts.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Recent events (new applications, quotas reached, rule changes).
     Events,
 }
@@ -477,6 +486,61 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 .collect();
             println!("last {days} days\n");
             table(&["APP", "DOWN", "UP", "TOTAL"], &rows, &[1, 2, 3]);
+        }
+        Cmd::Remotes { app, limit } => {
+            let mut path = format!("/api/remotes?limit={limit}");
+            if let Some(a) = &app {
+                path += &format!("&app={}", encode(a));
+            }
+            let remotes = c.get(&path)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&remotes)?);
+                return Ok(());
+            }
+            let list = |v: &Value| -> String {
+                v.as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|x| x.to_string().trim_matches('"').to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let rows: Vec<Vec<String>> = remotes
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|r| {
+                    let apps: Vec<String> = r["apps"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(|a| a.rsplit(['/', '\\']).next().unwrap_or(a).to_string())
+                        .collect();
+                    let mut row = vec![
+                        r["host"].as_str().unwrap_or("").to_string(),
+                        r["ip"].as_str().unwrap_or("").to_string(),
+                        format_bytes(u(&r["down"])),
+                        format_bytes(u(&r["up"])),
+                        list(&r["protocols"]),
+                        list(&r["ports"]),
+                        r["open_connections"].to_string(),
+                    ];
+                    if app.is_none() {
+                        row.push(apps.join(","));
+                    }
+                    row
+                })
+                .collect();
+            let mut headers = vec!["HOST", "IP", "DOWN", "UP", "PROTO", "PORTS", "OPEN"];
+            if app.is_none() {
+                headers.push("APPS");
+            }
+            if rows.is_empty() {
+                println!("no traffic to remote hosts yet");
+            } else {
+                table(&headers, &rows, &[2, 3, 6]);
+            }
         }
         Cmd::Events => {
             let events = c.get("/api/events")?;

@@ -38,7 +38,8 @@ trade-offs stay visible.
 - **Alerts.** Quota at 80% and 100% and "app first seen" are events today. Add bandwidth spikes and
   changed binary hashes, delivered as desktop notifications and webhooks.
 - **Long-term graphs.** Hourly resolution, per app and per remote, with CSV/JSON export.
-- **"Who is this app talking to?"** Top remotes per app with bytes, ASN and country.
+- **ASN and country for remote hosts.** "Who is this app talking to?" is done (hosts per app with
+  bytes, ports and protocols). Next: ASN and country, and keeping it across restarts.
 - **Binary identity.** Hash and code-signature checks so a rule for `firefox` doesn't follow a
   replaced binary.
 

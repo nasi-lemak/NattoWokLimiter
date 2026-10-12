@@ -4,6 +4,16 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::time::Duration;
 
+/// Percent-encodes a query parameter value.
+pub fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct Client {
     base: String,

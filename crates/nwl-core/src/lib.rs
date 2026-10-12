@@ -5,6 +5,7 @@
 //! * [`accounting`]: per-application rates, totals and history.
 //! * [`quota`]: per-period data caps.
 //! * [`rate`]: parsing and formatting of sizes and rates.
+//! * [`remotes`]: bytes per remote address per application.
 //! * [`api`]: request and response types of the daemon's HTTP API.
 
 pub mod accounting;
@@ -12,4 +13,5 @@ pub mod api;
 pub mod model;
 pub mod quota;
 pub mod rate;
+pub mod remotes;
 pub mod rules;

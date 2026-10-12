@@ -504,15 +504,25 @@ impl NwlApp {
             }
         }
 
+        let (tracked, remotes) = {
+            let d = lock(&self.data);
+            (d.remotes_app.clone(), d.remotes.clone())
+        };
+        if tracked != self.expanded {
+            let _ = self.poller.send(Request::Remotes(self.expanded.clone()));
+        }
         if let Some(app) = self.expanded.clone() {
             ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
-                ui.strong(format!("Connections of {}", app.display_name()));
+                ui.strong(format!("{} talks to", app.display_name()));
                 if ui.small_button("×").on_hover_text("Close").clicked() {
                     self.expanded = None;
                 }
             });
+            remotes_table(ui, &remotes);
+            ui.add_space(8.0);
+            ui.strong("Open connections");
             conn_table(ui, "detail", &detail, false);
         }
     }
@@ -1085,12 +1095,14 @@ fn app_cell(ui: &mut Ui, name: &str, path: &str, blocked: bool, tag: Option<(Str
                 n = n.strikethrough().weak();
             }
             ui.horizontal(|ui| {
-                ui.label(n);
+                // Not selectable, so a click on the name opens the row.
+                ui.add(egui::Label::new(n).selectable(false));
                 if let Some((text, color)) = tag {
                     ui.label(RichText::new(text).small().color(color));
                 }
             });
-            ui.label(RichText::new(path).small().weak()).on_hover_text(path);
+            ui.add(egui::Label::new(RichText::new(path).small().weak()).selectable(false))
+                .on_hover_text(path);
         });
     });
 }
@@ -1109,6 +1121,69 @@ fn sparkline(ui: &mut Ui, history: &VecDeque<(u64, u64)>) {
         ui.painter().add(egui::Shape::line(down, Stroke::new(1.4, DOWN)));
         ui.painter().add(egui::Shape::line(up, Stroke::new(1.2, UP)));
     }
+}
+
+/// Remote hosts of one app this session, most traffic first.
+fn remotes_table(ui: &mut Ui, remotes: &[nwl_core::api::RemoteView]) {
+    if remotes.is_empty() {
+        ui.weak("No traffic to remote hosts yet.");
+        return;
+    }
+    let max = remotes.iter().map(|r| r.up + r.down).max().unwrap_or(1).max(1);
+    TableBuilder::new(ui)
+        .id_salt("remotes")
+        .striped(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::remainder().at_least(260.0).clip(true))
+        .columns(Column::exact(95.0), 2)
+        .column(Column::exact(120.0).clip(true))
+        .column(Column::exact(50.0))
+        .column(Column::exact(140.0))
+        .header(22.0, |mut h| {
+            for t in ["HOST", "DOWN", "UP", "PORTS", "OPEN", "SHARE"] {
+                h.col(|ui| {
+                    ui.weak(RichText::new(t).small().strong());
+                });
+            }
+        })
+        .body(|mut body| {
+            for r in remotes {
+                body.row(34.0, |mut row| {
+                    row.col(|ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            match &r.host {
+                                Some(h) => {
+                                    ui.label(RichText::new(h).strong()).on_hover_text(h);
+                                    ui.label(RichText::new(r.ip.to_string()).monospace().small().weak());
+                                }
+                                None => {
+                                    ui.monospace(r.ip.to_string());
+                                }
+                            }
+                        });
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(format_bytes(r.down)).color(DOWN).monospace());
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(format_bytes(r.up)).color(UP).monospace());
+                    });
+                    row.col(|ui| {
+                        let protos: Vec<String> = r.protocols.iter().map(|p| p.to_string()).collect();
+                        let ports: Vec<String> = r.ports.iter().map(u16::to_string).collect();
+                        ui.label(format!("{} {}", protos.join("/"), ports.join(",")));
+                    });
+                    row.col(|ui| {
+                        ui.label(r.open_connections.to_string());
+                    });
+                    row.col(|ui| {
+                        let frac = (r.up + r.down) as f32 / max as f32;
+                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0).fill(ACCENT));
+                    });
+                });
+            }
+        });
 }
 
 fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {

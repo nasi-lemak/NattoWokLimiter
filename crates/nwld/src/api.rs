@@ -61,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/quotas", get(quotas))
         .route("/api/events", get(events))
         .route("/api/usage", get(usage))
+        .route("/api/remotes", get(remotes))
         .route("/api/stream", get(stream))
         .layer(middleware::from_fn(guard))
         .with_state(state)
@@ -207,6 +208,16 @@ async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> impl
 }
 
 #[derive(Deserialize)]
+struct RemotesQuery {
+    app: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn remotes(State(s): State<AppState>, Query(q): Query<RemotesQuery>) -> impl IntoResponse {
+    Json(s.engine().remotes(q.app.as_deref(), q.limit.unwrap_or(50).clamp(1, 1000)))
+}
+
+#[derive(Deserialize)]
 struct UsageQuery {
     days: Option<usize>,
 }
@@ -329,6 +340,8 @@ mod tests {
         serde_json::from_value::<nwl_core::api::Status>(status).unwrap();
         let (_, overview) = call(&app, "GET", "/api/overview", "localhost", false, "").await;
         serde_json::from_value::<nwl_core::api::Overview>(overview).unwrap();
+        let (_, remotes) = call(&app, "GET", "/api/remotes?limit=5", "localhost", false, "").await;
+        serde_json::from_value::<Vec<nwl_core::api::RemoteView>>(remotes).unwrap();
         let (_, conns) = call(&app, "GET", "/api/connections", "localhost", false, "").await;
         serde_json::from_value::<Vec<nwl_core::api::ConnView>>(conns).unwrap();
         let rule = r#"{"name":"r","match":{"app":"x"},"action":{"type":"block"}}"#;

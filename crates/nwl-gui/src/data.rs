@@ -2,7 +2,7 @@
 //! network. The UI reads [`Data`] and sends [`Request`]s.
 
 use crate::client::Client;
-use nwl_core::api::{AppView, ConnView, Event, Overview, Status, UsageDay};
+use nwl_core::api::{AppView, ConnView, Event, Overview, RemoteView, Status, UsageDay};
 use nwl_core::model::AppId;
 use nwl_core::rules::Rule;
 use std::collections::{HashMap, VecDeque};
@@ -27,6 +27,9 @@ pub struct Data {
     pub events: Vec<Event>,
     pub usage: Vec<UsageDay>,
     pub usage_days: usize,
+    /// Remote hosts of the app whose details are open.
+    pub remotes: Vec<RemoteView>,
+    pub remotes_app: Option<AppId>,
     /// Result of the last action, shown as a toast.
     pub toast: Option<(String, bool, Instant)>,
     last_mono: u64,
@@ -56,6 +59,8 @@ pub enum Request {
     /// Poll now instead of waiting for the next second.
     Refresh,
     Usage(usize),
+    /// Track the remote hosts of this app (or stop).
+    Remotes(Option<AppId>),
 }
 
 pub type Shared = Arc<Mutex<Data>>;
@@ -81,6 +86,11 @@ pub fn spawn_poller(
                     Ok(Request::Usage(days)) => {
                         lock(&data).usage_days = days;
                         usage_due = Instant::now();
+                    }
+                    Ok(Request::Remotes(app)) => {
+                        let mut d = lock(&data);
+                        d.remotes.clear();
+                        d.remotes_app = app;
                     }
                     Ok(Request::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -119,6 +129,10 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
     } else {
         vec![]
     };
+    let remotes_app = lock(data).remotes_app.clone();
+    let remotes: Option<Vec<RemoteView>> = remotes_app.as_ref().and_then(|app| {
+        client.get(&format!("/api/remotes?limit=20&app={}", crate::client::encode(&app.0))).ok()
+    });
     let usage_days = lock(data).usage_days.max(7);
     let usage: Option<Vec<UsageDay>> = if Instant::now() >= *usage_due {
         *usage_due = Instant::now() + Duration::from_secs(10);
@@ -164,6 +178,10 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
     }
     if let Some(u) = usage {
         d.usage = u;
+    }
+    // Ignore a response for an app that is no longer selected.
+    if let Some(r) = remotes.filter(|_| d.remotes_app == remotes_app) {
+        d.remotes = r;
     }
     d.overview = Some(overview);
 }

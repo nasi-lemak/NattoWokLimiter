@@ -2,10 +2,31 @@
 //! clients (CLI, desktop app).
 
 use crate::accounting::SystemStats;
-use crate::model::{AppId, Connection};
+use crate::model::{AppId, Connection, Protocol};
 use crate::quota::QuotaStatus;
 use crate::rules::RuleId;
 use serde::{Deserialize, Serialize};
+
+/// A remote address an application exchanged data with this session
+/// (`GET /api/remotes`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteView {
+    pub ip: std::net::IpAddr,
+    /// Reverse-DNS name, once resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub up: u64,
+    pub down: u64,
+    pub ports: Vec<u16>,
+    pub protocols: Vec<Protocol>,
+    /// Applications that talked to it (only when not filtered by app).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<AppId>,
+    /// Sockets connected to it right now.
+    pub open_connections: usize,
+    /// Seconds since the last traffic.
+    pub idle_secs: u64,
+}
 
 /// `GET /api/status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
