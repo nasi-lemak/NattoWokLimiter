@@ -1,0 +1,17 @@
+[package]
+name = "nwl"
+description = "Command-line client for the NattoWokLimiter daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nwl-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+ureq.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

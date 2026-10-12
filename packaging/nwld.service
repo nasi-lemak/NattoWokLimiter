@@ -1,0 +1,17 @@
+[Unit]
+Description=NattoWokLimiter per-application network monitor and limiter
+Documentation=https://github.com/nasi-lemak/NattoWokLimiter
+After=network.target nftables.service
+
+[Service]
+ExecStart=/usr/local/bin/nwld
+Restart=on-failure
+# nwld moves processes of targeted apps into child cgroups and manages its
+# own nftables table; it needs root. The dashboard listens on 127.0.0.1:7657.
+StateDirectory=nattowok
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

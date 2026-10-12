@@ -1,0 +1,207 @@
+# NattoWok Limiter
+
+**See which apps use your network, then control them.** NattoWok Limiter is a per-application network
+monitor, firewall, bandwidth limiter and data-cap manager in the spirit of NetLimiter, NetBalancer
+and GlassWire. The goal is to beat all three: it's open, scriptable, cross-platform, and honest
+about what the OS can and can't do.
+
+```
+$ nwl top
+total  down 2.28 MB/s  up 138.40 kB/s  (session 227.10 MB down, 14.20 MB up)
+
+APP            DOWN          UP    SESSION  CONNS  POLICY   PATH
+steam     1.00 MB/s  27.60 kB/s  175.00 MB      2  limited  /home/me/.steam/steam/ubuntu12_32/steam
+firefox 906.00 kB/s  40.30 kB/s   14.00 MB      3           /usr/lib/firefox/firefox
+spotify 236.00 kB/s   2.86 kB/s    5.09 MB      1           /usr/share/spotify/spotify
+dropbox           -           -   28.10 MB      1  blocked  /home/me/.dropbox-dist/dropbox
+
+$ nwl limit steam --down 1MB/s
+$ nwl block dropbox
+$ nwl quota spotify 2GB --per month
+```
+
+It also has a live web dashboard (served by the daemon at <http://127.0.0.1:7657>) with a traffic graph,
+per-app sparklines, one-click block and limit, a connection inspector with RTT, a rules editor, data
+usage history and an event log.
+
+## What it does today
+
+| Feature | Linux | Windows |
+|---|---|---|
+| Live per-app download/upload rates, session totals | ✅ exact per TCP socket (`sock_diag` + `tcp_info`) | ✅ TCP EStats (run as Administrator) |
+| Connection list: owner, state, rates, RTT, which rule applies | ✅ | ✅ (no RTT yet) |
+| Block an app / network / port (in, out or both) | ✅ nftables | ✅ Windows Firewall |
+| Bandwidth limits per app or network, download **and** upload | ✅ nftables policing | ⚠️ upload only (QoS policy) |
+| Data quotas per day/week/month, auto-block when reached | ✅ | ✅ |
+| Usage history per app per day (400 days) | ✅ | ✅ |
+| "New app used the network" events | ✅ | ✅ |
+| Web dashboard, REST API, live stream, CLI | ✅ | ✅ |
+
+Rules are evaluated predictably (see [rules](#rules)), and when a backend can't express a rule exactly
+it **reports a warning in the UI** instead of silently doing something else.
+
+Status: early (v0.1). The Linux backend is tested end-to-end against a real kernel (see
+`crates/nwl-platform/tests/linux_enforce.rs`: a 1 MB/s limit measures 1.00 MB/s steady state, block
+and cleanup verified). The Windows backend compiles and its rule translation is unit tested, but it
+hasn't been run on a Windows machine yet.
+
+## Quick start
+
+Requirements: Rust 1.80+. On Linux, enforcement needs root, `nft` (nftables) and cgroup v2, which any
+current distribution has. Monitoring works without them.
+
+```sh
+cargo build --release
+
+# Try it without touching your system: simulated apps that obey your rules.
+./target/release/nwld --demo
+# open http://127.0.0.1:7657
+
+# Real system (Linux): monitor + enforce
+sudo ./target/release/nwld
+# Monitor only, never installs anything
+./target/release/nwld --monitor-only
+```
+
+On Windows, run `nwld.exe` from an elevated prompt. Without elevation it still monitors connections,
+but per-connection byte counters and enforcement need Administrator.
+
+Install as a service on Linux: copy the binaries to `/usr/local/bin` and use
+[`packaging/nwld.service`](packaging/nwld.service).
+
+### CLI
+
+```
+nwl status                       daemon and enforcement status
+nwl top [-w]                     apps by current traffic (-w to watch)
+nwl conns [--app PATH] [-a]      sockets with owner, rates, RTT, policy
+nwl rules                        rules in evaluation order
+nwl block APP [--direction in|out|both]
+nwl limit APP [--down RATE] [--up RATE]
+nwl quota APP SIZE [--per day|week|month] [--direction in|out|both]
+nwl add '<rule json>'            any rule, see below
+nwl rm ID | enable ID | disable ID
+nwl usage [--days N]             data used per app
+nwl events
+```
+
+Use `--json` for machine-readable output. `APP` is an executable name (`firefox`), a full path, or a glob
+(`*/steam/*`). Rates accept `500kB/s`, `2MB/s`, `1.5MiB/s`, `20Mbit`, `10Mbps`; sizes accept `500MB`,
+`20GB`, `1TiB`.
+
+## Rules
+
+Rules live in `rules.json` in the state directory (`/var/lib/nattowok` as root,
+`~/.local/state/nattowok` otherwise, `%ProgramData%\NattoWokLimiter` on Windows). They are normally
+managed through the UI, CLI or API.
+
+```json
+{
+  "name": "Throttle Steam downloads",
+  "enabled": true,
+  "match": {
+    "app": "steam",
+    "protocol": "tcp",
+    "remote": ["203.0.113.0/24", "2001:db8::/32"],
+    "remote_ports": [443, "27000-27100"],
+    "local_ports": [],
+    "uid": 1000
+  },
+  "action": { "type": "limit", "download": "5MB/s", "upload": "1MB/s" }
+}
+```
+
+Every `match` field is optional, and an empty match covers all traffic. Actions:
+
+* `{"type": "allow"}` and `{"type": "block", "direction": "in" | "out" | "both"}` are **access rules**.
+  They're checked top to bottom and the first match wins. No match means allow.
+* `{"type": "limit", "download": RATE, "upload": RATE}` limits **always apply**, whatever the order and
+  whatever access rule matched. Each limit is one shared budget for everything it matches, so several
+  limits can stack (per app plus a global cap).
+* `{"type": "quota", "limit": SIZE, "period": "day" | "week" | "month", "direction": ...}` counts the
+  traffic it matches in local calendar periods. Once the cap is reached, that traffic is blocked until
+  the next period.
+
+Localhost traffic is never counted or policed unless the daemon runs with `--include-loopback`. It
+never reaches your ISP, and throttling it breaks local apps.
+
+## How it works
+
+```
+             ┌───────────── nwld (daemon) ──────────────┐
+  kernel ──▶ │ Monitor ─▶ Snapshot ─▶ Engine ─▶ Enforcer │ ──▶ kernel
+             │            accounting, quotas, usage,     │
+             │            events, rule store             │
+             │                 │                         │
+             │      REST + SSE API, web dashboard        │
+             └─────────────────┬─────────────────────────┘
+                               │ http://127.0.0.1:7657
+                 browser ──────┴────── nwl (CLI)
+```
+
+* **`nwl-core`**: platform-independent data model, rule engine, accounting (rates, totals, history),
+  quotas, and size/rate parsing. No I/O.
+* **`nwl-platform`**: the OS backends, each a `Monitor` (observe) plus an `Enforcer` (apply rules):
+  * **Linux**: sockets come from `NETLINK_SOCK_DIAG` with `tcp_info`, which gives exact per-socket
+    byte counters and RTT without eBPF. Owners are resolved via `/proc/<pid>/fd`. To enforce,
+    processes of targeted apps move into a child cgroup *inside their current cgroup*, so systemd
+    units and desktop scopes still own them. One atomic nftables table then matches those sockets with
+    `socket cgroupv2` and drops or polices their packets, using shared named `limit` objects.
+  * **Windows**: sockets come from `GetExtendedTcpTable`/`GetExtendedUdpTable`, bytes from TCP
+    extended statistics, and totals from `GetIfTable2`. Rules become Windows Firewall rules and QoS
+    policies, installed by one PowerShell script and grouped under `NattoWokLimiter`.
+  * **Simulated**: demo apps and traffic that obey the installed rules, for trying things out and
+    developing the UI.
+* **`nwld`**: the daemon. It runs the sampling loop, persists state, and serves the API and dashboard.
+  When it stops, it removes everything it installed.
+* **`nwl`**: the CLI.
+
+The API listens on loopback only. It rejects requests whose `Host` isn't a loopback name (to stop DNS
+rebinding), and state-changing requests must carry an `X-NWL-Client` header (to stop CSRF from web
+pages).
+
+### API
+
+| Method | Path | |
+|---|---|---|
+| GET | `/api/status` | version, backends, enforcement warnings/errors |
+| GET | `/api/overview` | system rates, apps, quotas: what the stream sends each tick |
+| GET | `/api/apps` | apps with history |
+| GET | `/api/connections?app=PATH` | sockets with rates and policy decision |
+| GET | `/api/system/history` | recent system-wide samples |
+| GET/POST | `/api/rules` | list / create |
+| PUT/DELETE | `/api/rules/{id}` | replace / delete |
+| POST | `/api/rules/{id}/move` | `{"index": n}` reorder |
+| GET | `/api/quotas` | quota usage in the current period |
+| GET | `/api/usage?days=N` | per-app bytes per day |
+| GET | `/api/events?after=ID` | event log |
+| GET | `/api/stream` | Server-Sent Events, one `overview` per tick |
+
+## Known limitations
+
+* **Linux**: UDP and other non-TCP traffic shows in interface totals but not in per-app bytes. The
+  kernel doesn't keep per-socket UDP byte counters, and fixing that needs eBPF (see the roadmap). A
+  new process of a limited app is classified within one tick (1 s by default). Limits police (drop
+  above the rate) instead of queueing. That works well for TCP, but the first second of a transfer can
+  exceed the limit, because the kernel's bucket holds one second of rate.
+* **Windows**: no download limits yet (they need a packet driver). Windows Firewall applies block
+  rules before allow rules, so an `allow` can't carve an exception out of a later `block`. Both cases
+  show as warnings. Byte counters cover TCP only.
+* **macOS**: not supported yet (`--demo` works).
+
+## Roadmap
+
+See [docs/ROADMAP.md](docs/ROADMAP.md). The big ones: eBPF backend (exact UDP accounting, instant
+classification, true shaping and priorities), a Windows packet driver for download limits, ask-on-first-
+connection firewall prompts, hostnames and domain rules, schedules, and a native desktop app with a
+tray icon.
+
+## Development
+
+```sh
+cargo test                       # unit + API tests, no privileges needed
+sudo -E cargo test -p nwl-platform --test linux_enforce -- --ignored   # real-kernel enforcement test
+cargo clippy --all-targets
+cargo clippy --all-targets --target x86_64-pc-windows-msvc            # check the Windows backend from Linux
+cargo run -p nwld -- --demo      # dashboard with simulated traffic
+```
