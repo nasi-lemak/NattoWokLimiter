@@ -6,6 +6,7 @@
 mod app;
 mod client;
 mod data;
+mod notify;
 
 use std::sync::{Arc, Mutex};
 
@@ -54,7 +55,7 @@ fn main() -> eframe::Result {
             }
             cc.egui_ctx.set_fonts(fonts);
             let client = client::Client::new(&server);
-            let shared = Arc::new(Mutex::new(data::Data::default()));
+            let shared = Arc::new(Mutex::new(data::Data::new()));
             let ctx = cc.egui_ctx.clone();
             let poller = data::spawn_poller(client.clone(), shared.clone(), move || ctx.request_repaint());
             Ok(Box::new(app::NwlApp::new(&cc.egui_ctx, client, shared, poller)))

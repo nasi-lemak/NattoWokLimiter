@@ -48,6 +48,8 @@ There are three front ends over the same daemon:
 | "Who is this app talking to?": remote hosts per app with bytes, ports, protocols | ✅ | ✅ |
 | Usage history per app per day (400 days) | ✅ | ✅ |
 | "New app used the network" events | ✅ | ✅ |
+| Traffic spike detection ("Dropbox is uploading at 8 MB/s, usually 12 kB/s") | ✅ | ✅ |
+| Desktop notifications for new apps, spikes, quotas and enforcement problems, each switchable | ✅ | ✅ |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
 
 Rules are evaluated predictably (see [rules](#rules)), and when a backend can't express a rule exactly

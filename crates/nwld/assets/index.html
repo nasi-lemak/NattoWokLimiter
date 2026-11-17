@@ -715,6 +715,7 @@ const events = [];
 function eventText(e) {
   switch (e.kind) {
     case "new_app": return `<b>${esc(e.name)}</b> used the network for the first time <span class="mono" style="color:var(--muted)">${esc(e.app)}</span>`;
+    case "traffic_spike": return `<span class="chip warn">spike</span> <b>${esc(e.name)}</b> is ${e.direction === "out" ? "uploading" : "downloading"} at ${fmtRate(e.rate)} (usually ${fmtRate(e.usual)})`;
     case "quota_warning": return `<span class="chip warn">quota</span> Rule #${e.rule} ${esc(e.name)} has used ${e.percent}% of its quota`;
     case "quota_exhausted": return `<span class="chip bad">quota</span> Quota reached for rule #${e.rule} ${esc(e.name)} — traffic blocked until the period resets`;
     case "rule_added": return `Rule #${e.rule} added ${esc(e.name)}`;

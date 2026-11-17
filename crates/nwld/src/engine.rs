@@ -13,6 +13,7 @@ use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapsh
 use nwl_core::quota::{QuotaStatus, QuotaTracker};
 use nwl_core::remotes::{RemoteStats, RemoteTracker};
 use nwl_core::rules::{Action, Day, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
+use nwl_core::spikes::SpikeDetector;
 use nwl_platform::{EnforceReport, Policy};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -28,6 +29,7 @@ pub struct Engine {
     resolver: Option<Resolver>,
     /// Bytes per remote address per app, for this session.
     remotes: RemoteTracker,
+    spikes: SpikeDetector,
     store: Store,
     /// Rules as configured.
     pub rules: RuleSet,
@@ -38,6 +40,10 @@ pub struct Engine {
     clock: Option<(Day, u16)>,
     /// Quota rule -> period in which its 80% warning was raised.
     warned: HashMap<RuleId, String>,
+    /// Whether quota states have been taken in since startup. The first
+    /// tick only records them: quotas reached (or past 80%) before a restart
+    /// were announced then and are not announced again.
+    quotas_primed: bool,
     accountant: Accountant,
     quotas: QuotaTracker,
     usage: UsageDb,
@@ -99,9 +105,11 @@ impl Engine {
             count_loopback: false,
             resolver: None,
             remotes: RemoteTracker::new(1000),
+            spikes: SpikeDetector::default(),
             effective: rules.clone(),
             clock: None,
             warned: HashMap::new(),
+            quotas_primed: false,
             rules,
             accountant: Accountant::new(history_len, 5 * 60 * 1000),
             quotas: store.load(QUOTAS)?.unwrap_or_default(),
@@ -213,7 +221,25 @@ impl Engine {
         }
         self.app_samples.retain(|app, _| self.accountant.apps().any(|a| &a.app == app));
 
+        let mut spikes = Vec::new();
+        for a in self.accountant.apps() {
+            spikes.extend(self.spikes.observe(&a.app, a.rate_up, a.rate_down, snap.mono_ms));
+        }
+        let accountant = &self.accountant;
+        self.spikes.retain(|app| accountant.apps().any(|a| &a.app == app));
+        for s in spikes {
+            let name = s.app.display_name().to_string();
+            self.push_event(EventKind::TrafficSpike {
+                app: s.app,
+                name,
+                direction: s.direction,
+                rate: s.rate,
+                usual: s.usual,
+            });
+        }
+
         self.refresh_exhausted();
+        self.quotas_primed = true;
         self.snapshot = snap;
         self.dirty = true;
     }
@@ -225,14 +251,17 @@ impl Engine {
         let mut exhausted = Vec::new();
         for s in &status {
             let name = self.rules.get(s.rule).map(|r| r.name.clone()).unwrap_or_default();
+            let announce = self.quotas_primed;
             if s.exhausted {
                 exhausted.push(s.rule);
-                if !self.exhausted.contains(&s.rule) {
+                if !self.exhausted.contains(&s.rule) && announce {
                     self.push_event(EventKind::QuotaExhausted { rule: s.rule, name });
                 }
             } else if s.used * 10 >= s.limit * 8 && self.warned.get(&s.rule) != Some(&s.period_key) {
                 self.warned.insert(s.rule, s.period_key.clone());
-                self.push_event(EventKind::QuotaWarning { rule: s.rule, name, percent: 80 });
+                if announce {
+                    self.push_event(EventKind::QuotaWarning { rule: s.rule, name, percent: 80 });
+                }
             }
         }
         self.exhausted = exhausted;
@@ -687,6 +716,55 @@ mod tests {
         let all = e.remotes(None, 10);
         assert_eq!(all[0].apps, vec![AppId("/opt/steam/steam".into())]);
         assert!(e.remotes(Some("/nope"), 10).is_empty());
+    }
+
+    #[test]
+    fn traffic_spikes_become_events() {
+        let mut e = Engine::new(temp_store("spike"), 10).unwrap();
+        let (mut sent, mut ms) = (0u64, 0u64);
+        // 30 s at ~1 kB/s upload, then 5 s at 8 MB/s.
+        for step in 0..35 {
+            sent += if step < 30 { 1_000 } else { 8_000_000 };
+            e.ingest(snap(ms, sent, 0), at(12));
+            ms += 1000;
+        }
+        let spikes: Vec<_> = e
+            .events_since(0)
+            .into_iter()
+            .filter_map(|ev| match ev.kind {
+                EventKind::TrafficSpike { name, direction, rate, .. } => Some((name, direction, rate)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spikes, vec![("steam".to_string(), Direction::Out, 8_000_000)]);
+    }
+
+    #[test]
+    fn reached_quotas_are_not_announced_again_after_a_restart() {
+        let store = temp_store("quota-restart");
+        let dir = store.dir().to_path_buf();
+        let mut e = Engine::new(store, 10).unwrap();
+        e.add_rule(
+            serde_json::from_str(
+                r#"{"match":{"app":"steam"},"action":{"type":"quota","limit":1000,"period":"day"}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        e.ingest(snap(1000, 0, 5000), at(12));
+        let reached = |e: &Engine| {
+            e.events_since(0).iter().filter(|ev| matches!(ev.kind, EventKind::QuotaExhausted { .. })).count()
+        };
+        assert_eq!(reached(&e), 1);
+        e.save().unwrap();
+
+        let mut e = Engine::new(Store::open(dir.clone()).unwrap(), 10).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        e.ingest(snap(1000, 0, 0), at(12));
+        assert_eq!(e.policy().exhausted_quotas.len(), 1, "still enforced");
+        assert_eq!(reached(&e), 0, "but not announced again");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

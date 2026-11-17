@@ -28,7 +28,13 @@ struct Profile {
     down: f64,
     /// 0 = steady, otherwise period in ticks of an on/off burst pattern.
     burst_period: u64,
+    /// 0 = never, otherwise every this many ticks the app moves 400x its
+    /// usual upload for a while (a backup kicking in: a traffic spike).
+    spike_every: u64,
 }
+
+/// Length of a simulated upload spike, in ticks.
+const SPIKE_TICKS: u64 = 20;
 
 const PROFILES: &[Profile] = &[
     Profile {
@@ -39,6 +45,7 @@ const PROFILES: &[Profile] = &[
         up: 40e3,
         down: 900e3,
         burst_period: 7,
+        spike_every: 0,
     },
     Profile {
         pid: 3300,
@@ -48,6 +55,7 @@ const PROFILES: &[Profile] = &[
         up: 20e3,
         down: 6e6,
         burst_period: 0,
+        spike_every: 0,
     },
     Profile {
         pid: 4120,
@@ -57,6 +65,7 @@ const PROFILES: &[Profile] = &[
         up: 60e3,
         down: 120e3,
         burst_period: 0,
+        spike_every: 0,
     },
     Profile {
         pid: 5021,
@@ -66,6 +75,7 @@ const PROFILES: &[Profile] = &[
         up: 4e3,
         down: 330e3,
         burst_period: 12,
+        spike_every: 0,
     },
     Profile {
         pid: 6100,
@@ -75,6 +85,7 @@ const PROFILES: &[Profile] = &[
         up: 1.5e6,
         down: 30e3,
         burst_period: 20,
+        spike_every: 0,
     },
     Profile {
         pid: 812,
@@ -84,6 +95,17 @@ const PROFILES: &[Profile] = &[
         up: 300.0,
         down: 600.0,
         burst_period: 0,
+        spike_every: 0,
+    },
+    Profile {
+        pid: 7330,
+        name: "rclone",
+        exe: "/usr/bin/rclone",
+        remotes: &["52.219.170.33:443"],
+        up: 20e3,
+        down: 2e3,
+        burst_period: 0,
+        spike_every: 120,
     },
 ];
 
@@ -199,8 +221,10 @@ impl Monitor for SimulatedMonitor {
             let n = p.remotes.len() as f64;
             let on = p.burst_period == 0 || (self.tick / p.burst_period) % 2 == 0;
             let wobble = 0.7 + 0.6 * self.rand();
+            let spiking = p.spike_every > 0 && self.tick % p.spike_every >= p.spike_every - SPIKE_TICKS;
             let scale = if on { 1.0 } else { 0.05 } * wobble * self.conns[i].weight * dt / n;
-            wanted.push((p.up * scale, p.down * scale));
+            let up_scale = if spiking { 400.0 } else { 1.0 };
+            wanted.push((p.up * scale * up_scale, p.down * scale));
         }
 
         // Apply the policy the enforcer installed.
@@ -269,6 +293,7 @@ pub fn demo_hostname(ip: std::net::IpAddr) -> Option<String> {
         "35.186.224.25" => "25.224.186.35.bc.googleusercontent.com",
         "162.125.19.131" => "edge-block-www-env.dropbox-dns.com",
         "1.1.1.1" => "one.one.one.one",
+        "52.219.170.33" => "s3-r-w.eu-central-1.amazonaws.com",
         _ => return None,
     };
     Some(name.to_string())

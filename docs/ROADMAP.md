@@ -35,8 +35,8 @@ trade-offs stay visible.
 
 ## Insight
 
-- **Alerts.** Quota at 80% and 100% and "app first seen" are events today. Add bandwidth spikes and
-  changed binary hashes, delivered as desktop notifications and webhooks.
+- **More alerts.** Desktop notifications are done (new apps, traffic spikes, quota at 80% and 100%,
+  enforcement problems). Next: changed binary hashes, per-app spike sensitivity, and webhooks.
 - **Long-term graphs.** Hourly resolution, per app and per remote, with CSV/JSON export.
 - **ASN and country for remote hosts.** "Who is this app talking to?" is done (hosts per app with
   bytes, ports and protocols). Next: ASN and country, and keeping it across restarts.

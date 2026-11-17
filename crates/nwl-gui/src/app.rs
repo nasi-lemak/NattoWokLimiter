@@ -190,6 +190,7 @@ pub struct NwlApp {
     form: RuleForm,
     usage_days: usize,
     dark: bool,
+    show_notify_settings: bool,
     /// Row order of the apps table last frame, and whether the pointer was
     /// over it: rows keep their place while the user aims at a button.
     app_order: Vec<AppId>,
@@ -213,6 +214,7 @@ impl NwlApp {
             form: RuleForm::default(),
             usage_days: 30,
             dark,
+            show_notify_settings: false,
             app_order: Vec::new(),
             freeze_order: false,
         }
@@ -263,6 +265,9 @@ impl NwlApp {
             ui.painter().circle_filled(dot.center(), 4.0, color);
             ui.label(RichText::new(text).color(color).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("🔔").on_hover_text("Notifications").clicked() {
+                    self.show_notify_settings = !self.show_notify_settings;
+                }
                 let icon = if self.dark { "☀" } else { "🌙" };
                 if ui.button(icon).on_hover_text("Toggle theme").clicked() {
                     self.dark = !self.dark;
@@ -525,6 +530,60 @@ impl NwlApp {
             ui.strong("Open connections");
             conn_table(ui, "detail", &detail, false);
         }
+    }
+
+    fn notify_window(&mut self, ctx: &egui::Context) {
+        if !self.show_notify_settings {
+            return;
+        }
+        let mut open = true;
+        let (mut settings, error) = {
+            let d = lock(&self.data);
+            (d.notify.clone(), d.notify_error.clone())
+        };
+        let before = settings.clone();
+        let mut test = false;
+        egui::Window::new("Notifications")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::RIGHT_TOP, [-12.0, 56.0])
+            .show(ctx, |ui| {
+                ui.checkbox(&mut settings.enabled, RichText::new("Show desktop notifications").strong());
+                ui.add_enabled_ui(settings.enabled, |ui| {
+                    ui.indent("kinds", |ui| {
+                        ui.checkbox(&mut settings.new_app, "An app uses the network for the first time");
+                        ui.checkbox(&mut settings.traffic_spike, "An app moves far more data than usual");
+                        ui.checkbox(&mut settings.quota_warning, "A quota passes 80%");
+                        ui.checkbox(
+                            &mut settings.quota_exhausted,
+                            "A quota is used up and its traffic blocked",
+                        );
+                        ui.checkbox(&mut settings.enforcement, "Rules stop (or start again) being applied");
+                    });
+                });
+                ui.add_space(4.0);
+                ui.weak("Only events from now on; past events stay in the Events tab.");
+                if let Some(e) = &error {
+                    ui.colored_label(BAD, format!("Notification service: {e}"));
+                }
+                if ui.button("Send a test notification").clicked() {
+                    test = true;
+                }
+            });
+        if settings != before {
+            let saved = settings.save();
+            let mut d = lock(&self.data);
+            d.notify = settings;
+            if let Err(e) = saved {
+                d.toast = Some((e, false, Instant::now()));
+            }
+        }
+        if test {
+            let result = crate::notify::show("NattoWok Limiter", "Notifications are working.");
+            lock(&self.data).notify_error = result.err();
+        }
+        self.show_notify_settings = open;
     }
 
     fn limit_window(&mut self, ctx: &egui::Context) {
@@ -1004,6 +1063,10 @@ impl NwlApp {
                         EventKind::RuleRemoved { rule, name } => (format!("Rule #{rule} removed {name}"), None),
                         EventKind::EnforcementError { message } => (format!("Enforcement error: {message}"), Some(BAD)),
                         EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(OK)),
+                        EventKind::TrafficSpike { .. } => {
+                            let (title, body) = crate::notify::text(&e.kind).unwrap_or_default();
+                            (format!("{title}. {body}"), Some(ACCENT))
+                        }
                     };
                     match color {
                         Some(c) => ui.colored_label(c, text),
@@ -1311,6 +1374,7 @@ impl eframe::App for NwlApp {
             }
         });
         self.limit_window(&ctx);
+        self.notify_window(&ctx);
 
         let toast = lock(&self.data).toast.clone();
         if let Some((text, ok, at)) = toast {

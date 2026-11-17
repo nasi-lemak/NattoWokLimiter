@@ -48,6 +48,17 @@ pub enum EventKind {
         rule: RuleId,
         name: String,
     },
+    /// An app is moving data far above its usual rate.
+    TrafficSpike {
+        app: AppId,
+        name: String,
+        /// `in` for downloads, `out` for uploads.
+        direction: crate::model::Direction,
+        /// Bytes/s now.
+        rate: u64,
+        /// Bytes/s before the spike.
+        usual: u64,
+    },
     /// A quota passed 80% of its cap in the current period.
     QuotaWarning {
         rule: RuleId,

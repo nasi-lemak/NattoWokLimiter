@@ -14,6 +14,13 @@ pub const SPARK: usize = 60;
 
 #[derive(Default)]
 pub struct Data {
+    /// Which events become desktop notifications.
+    pub notify: crate::notify::Settings,
+    /// Only events after this id are notified: the history that existed when
+    /// the app connected is not replayed. `None` until the first poll.
+    notify_after: Option<u64>,
+    /// The last error from the notification service, if any.
+    pub notify_error: Option<String>,
     pub connected: bool,
     pub error: Option<String>,
     pub status: Option<Status>,
@@ -38,6 +45,11 @@ pub struct Data {
 }
 
 impl Data {
+    /// Empty state with the user's saved notification settings.
+    pub fn new() -> Self {
+        Self { notify: crate::notify::Settings::load(), ..Self::default() }
+    }
+
     pub fn apps(&self) -> &[AppView] {
         self.overview.as_ref().map_or(&[], |o| &o.apps)
     }
@@ -162,7 +174,12 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
     d.last_mono = overview.mono_ms;
     let live: std::collections::HashSet<&AppId> = overview.apps.iter().map(|a| &a.app).collect();
     d.app_history.retain(|k, _| live.contains(k));
+    let notify_after = *d.notify_after.get_or_insert(overview.last_event);
+    let mut notifications = Vec::new();
     for e in events {
+        if e.id > notify_after && d.notify.wants(&e.kind) {
+            notifications.extend(crate::notify::text(&e.kind));
+        }
         d.last_event = d.last_event.max(e.id);
         d.events.insert(0, e);
     }
@@ -184,4 +201,11 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
         d.remotes = r;
     }
     d.overview = Some(overview);
+    drop(d);
+    // Shown outside the lock: talking to the notification service can take
+    // a moment and the UI must not wait for it.
+    for (title, body) in notifications {
+        let result = crate::notify::show(&title, &body);
+        lock(data).notify_error = result.err();
+    }
 }
