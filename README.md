@@ -50,6 +50,8 @@ There are three front ends over the same daemon:
 | "New app used the network" events | ✅ | ✅ |
 | Traffic spike detection ("Dropbox is uploading at 8 MB/s, usually 12 kB/s") | ✅ | ✅ |
 | Desktop notifications for new apps, spikes, quotas and enforcement problems, each switchable | ✅ | ✅ |
+| Tray icon: live speed meter, pause/resume all rules, close to tray | ✅ StatusNotifierItem (no GTK) | ✅ native |
+| Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
 
 Rules are evaluated predictably (see [rules](#rules)), and when a backend can't express a rule exactly
@@ -97,6 +99,7 @@ nwl quota APP SIZE [--per day|week|month] [--direction in|out|both] [WHEN]
       WHEN: --days mon,tue,…|weekdays|weekends  --from HH:MM --until HH:MM
 nwl add '<rule json>'            any rule, see below
 nwl rm ID | enable ID | disable ID
+nwl pause | resume               stop / restart all blocking and limiting
 nwl usage [--days N]             data used per app
 nwl remotes [--app PATH] [-n N]  remote hosts by traffic, per app or overall
 nwl events
@@ -205,6 +208,7 @@ pages).
 | GET/POST | `/api/rules` | list / create |
 | PUT/DELETE | `/api/rules/{id}` | replace / delete |
 | POST | `/api/rules/{id}/move` | `{"index": n}` reorder |
+| POST | `/api/pause` | `{"paused": true}` pauses all rules, `false` resumes |
 | GET | `/api/quotas` | quota usage in the current period |
 | GET | `/api/usage?days=N` | per-app bytes per day |
 | GET | `/api/remotes?app=PATH&limit=N` | remote hosts by traffic this session, for one app or all |

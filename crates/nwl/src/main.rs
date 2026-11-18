@@ -141,6 +141,11 @@ enum Cmd {
     Enable { id: u64 },
     /// Disable a rule without deleting it.
     Disable { id: u64 },
+    /// Pause all rules: nothing is blocked or limited until `resume` (or a
+    /// daemon restart). Traffic is still counted.
+    Pause,
+    /// Resume all rules.
+    Resume,
     /// Data used per application over recent days.
     Usage {
         #[arg(long, default_value_t = 7)]
@@ -463,6 +468,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Cmd::Enable { id } => set_enabled(&c, id, true)?,
         Cmd::Disable { id } => set_enabled(&c, id, false)?,
+        Cmd::Pause | Cmd::Resume => {
+            let paused = matches!(cli.cmd, Cmd::Pause);
+            c.call("POST", "/api/pause", Some(json!({ "paused": paused })))?;
+            println!(
+                "{}",
+                if paused { "all rules paused (resume with `nwl resume`)" } else { "rules resumed" }
+            );
+        }
         Cmd::Usage { days } if cli.json => raw(&format!("/api/usage?days={days}"))?,
         Cmd::Usage { days } => {
             let usage = c.get(&format!("/api/usage?days={days}"))?;

@@ -7,6 +7,7 @@ mod app;
 mod client;
 mod data;
 mod notify;
+mod tray;
 
 use std::sync::{Arc, Mutex};
 

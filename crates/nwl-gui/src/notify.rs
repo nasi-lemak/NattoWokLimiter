@@ -79,7 +79,9 @@ impl Settings {
                 // The user made these changes themselves.
                 EventKind::RuleAdded { .. }
                 | EventKind::RuleChanged { .. }
-                | EventKind::RuleRemoved { .. } => false,
+                | EventKind::RuleRemoved { .. }
+                | EventKind::Paused
+                | EventKind::Resumed => false,
             }
     }
 }
@@ -122,9 +124,11 @@ pub fn text(kind: &EventKind) -> Option<(String, String)> {
         EventKind::EnforcementRecovered => {
             ("Rules are applied again".to_string(), "Blocks and limits are active.".to_string())
         }
-        EventKind::RuleAdded { .. } | EventKind::RuleChanged { .. } | EventKind::RuleRemoved { .. } => {
-            return None
-        }
+        EventKind::RuleAdded { .. }
+        | EventKind::RuleChanged { .. }
+        | EventKind::RuleRemoved { .. }
+        | EventKind::Paused
+        | EventKind::Resumed => return None,
     })
 }
 

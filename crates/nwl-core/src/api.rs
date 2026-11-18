@@ -81,6 +81,10 @@ pub enum EventKind {
         message: String,
     },
     EnforcementRecovered,
+    /// The user paused all rules: nothing is blocked or limited.
+    Paused,
+    /// The user resumed all rules.
+    Resumed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +103,9 @@ pub struct EnforcementStatus {
     pub enforcing: bool,
     pub warnings: Vec<String>,
     pub error: Option<String>,
+    /// All rules are paused by the user (traffic is still counted).
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// An application row in the UI.

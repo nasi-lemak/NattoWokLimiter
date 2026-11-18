@@ -165,6 +165,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 1
     NattoWok Limiter
   </div>
   <span id="mode" class="badge"><span class="dot"></span>connecting…</span>
+  <button class="btn hidden" id="pause"></button>
   <div class="totals">
     <div class="total"><span class="label">Download</span><span id="tot-down" class="rate down">–</span></div>
     <div class="total"><span class="label">Upload</span><span id="tot-up" class="rate up">–</span></div>
@@ -289,6 +290,12 @@ async function api(path, opts = {}) {
   return body;
 }
 
+// ---- pause ----
+$("#pause").onclick = async () => {
+  try { await api("/api/pause", { method: "POST", body: JSON.stringify({ paused: !$("#pause").dataset.paused }) }); }
+  catch (e) { alert(e.message); }
+};
+
 // ---- theme ----
 (() => {
   let saved = null; try { saved = localStorage.getItem("nwl-theme"); } catch {}
@@ -374,7 +381,13 @@ function renderHeader(o) {
   const demo = s.monitor.startsWith("simulated");
   let cls = "ok", label = "Enforcing";
   if (s.error) { cls = "bad"; label = "Enforcement error"; }
+  else if (s.paused) { cls = "warn"; label = "Paused: nothing is blocked or limited"; }
   else if (!s.enforcing) { cls = "warn"; label = "Monitor only"; }
+  const pause = $("#pause");
+  pause.classList.toggle("hidden", !s.enforcing);
+  pause.textContent = s.paused ? "Resume rules" : "Pause rules";
+  pause.title = s.paused ? "Apply all blocks, limits and quotas again" : "Stop blocking and limiting until you resume (traffic is still counted)";
+  pause.dataset.paused = s.paused ? "1" : "";
   if (demo) { label = "Demo · " + label; }
   mode.className = "badge " + cls; mode.innerHTML = `<span class="dot"></span>${esc(label)}`;
   $("#backend").textContent = `${s.monitor} · ${s.enforcer}`;
@@ -723,6 +736,8 @@ function eventText(e) {
     case "rule_removed": return `Rule #${e.rule} removed ${esc(e.name)}`;
     case "enforcement_error": return `<span class="chip bad">error</span> ${esc(e.message)}`;
     case "enforcement_recovered": return `<span class="chip">ok</span> Enforcement recovered`;
+    case "paused": return `<span class="chip warn">paused</span> All rules paused`;
+    case "resumed": return `<span class="chip">resumed</span> All rules resumed`;
     default: return esc(e.kind);
   }
 }

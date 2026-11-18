@@ -191,6 +191,12 @@ pub struct NwlApp {
     usage_days: usize,
     dark: bool,
     show_notify_settings: bool,
+    /// The tray icon, where the desktop has a tray.
+    tray: Option<crate::tray::Tray>,
+    /// The window is hidden to the tray.
+    hidden: bool,
+    /// Quit was chosen: let the window close instead of hiding it.
+    quitting: bool,
     /// Row order of the apps table last frame, and whether the pointer was
     /// over it: rows keep their place while the user aims at a button.
     app_order: Vec<AppId>,
@@ -215,6 +221,12 @@ impl NwlApp {
             usage_days: 30,
             dark,
             show_notify_settings: false,
+            tray: {
+                let ctx = ctx.clone();
+                crate::tray::Tray::new(move || ctx.request_repaint())
+            },
+            hidden: false,
+            quitting: false,
             app_order: Vec::new(),
             freeze_order: false,
         }
@@ -233,8 +245,15 @@ impl NwlApp {
         result
     }
 
+    /// Pauses or resumes all rules in the daemon.
+    pub fn set_paused(&self, paused: bool) {
+        let done = if paused { "All rules paused" } else { "Rules resumed" };
+        let _ = self.act("POST", "/api/pause", Some(json!({ "paused": paused })), done);
+    }
+
     fn header(&mut self, ui: &mut Ui) {
         let d = lock(&self.data);
+        let mut toggle_pause: Option<bool> = None;
         ui.horizontal(|ui| {
             let (logo, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
             ui.painter().circle_filled(logo.center(), 11.0, ACCENT);
@@ -253,6 +272,8 @@ impl NwlApp {
                     let demo = if e.monitor.starts_with("simulated") { "Demo · " } else { "" };
                     if e.error.is_some() {
                         (format!("{demo}Enforcement error"), BAD)
+                    } else if e.paused {
+                        (format!("{demo}Paused: nothing is blocked or limited"), ACCENT)
                     } else if !e.enforcing {
                         (format!("{demo}Monitor only"), ACCENT)
                     } else {
@@ -264,6 +285,17 @@ impl NwlApp {
             let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 4.0, color);
             ui.label(RichText::new(text).color(color).strong());
+            if let Some(s) = d.status.as_ref().filter(|s| d.connected && s.enforcement.enforcing) {
+                let paused = s.enforcement.paused;
+                let (label, hint) = if paused {
+                    ("Resume rules", "Apply all blocks, limits and quotas again")
+                } else {
+                    ("Pause rules", "Stop blocking and limiting until you resume (traffic is still counted)")
+                };
+                if ui.small_button(label).on_hover_text(hint).clicked() {
+                    toggle_pause = Some(!paused);
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("🔔").on_hover_text("Notifications").clicked() {
                     self.show_notify_settings = !self.show_notify_settings;
@@ -285,6 +317,10 @@ impl NwlApp {
                 }
             });
         });
+        drop(d);
+        if let Some(paused) = toggle_pause {
+            self.set_paused(paused);
+        }
     }
 
     fn graph(&self, ui: &mut Ui) {
@@ -1063,6 +1099,8 @@ impl NwlApp {
                         EventKind::RuleRemoved { rule, name } => (format!("Rule #{rule} removed {name}"), None),
                         EventKind::EnforcementError { message } => (format!("Enforcement error: {message}"), Some(BAD)),
                         EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(OK)),
+                        EventKind::Paused => ("All rules paused".into(), Some(ACCENT)),
+                        EventKind::Resumed => ("All rules resumed".into(), Some(OK)),
                         EventKind::TrafficSpike { .. } => {
                             let (title, body) = crate::notify::text(&e.kind).unwrap_or_default();
                             (format!("{title}. {body}"), Some(ACCENT))
@@ -1340,7 +1378,78 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
         });
 }
 
+impl NwlApp {
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn hide_window(&mut self, ctx: &egui::Context) {
+        self.hidden = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    /// Handles tray commands and keeps the tray icon current. Runs every
+    /// tick, also while the window is hidden.
+    fn drive_tray(&mut self, ctx: &egui::Context) {
+        let Some(tray) = &self.tray else { return };
+        let commands = tray.commands();
+        let tray_visible = tray.visible();
+        for command in commands {
+            match command {
+                crate::tray::TrayCommand::ToggleWindow => {
+                    if self.hidden {
+                        self.show_window(ctx);
+                    } else if tray_visible {
+                        self.hide_window(ctx);
+                    } else {
+                        self.show_window(ctx);
+                    }
+                }
+                crate::tray::TrayCommand::SetPaused(paused) => self.set_paused(paused),
+                crate::tray::TrayCommand::SetNotifications(on) => {
+                    let mut d = lock(&self.data);
+                    d.notify.enabled = on;
+                    if let Err(e) = d.notify.save() {
+                        d.toast = Some((e, false, Instant::now()));
+                    }
+                }
+                crate::tray::TrayCommand::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        // Closing the window hides it to the tray, if a tray host shows the
+        // icon; otherwise the app would become unreachable, so it closes.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && tray_visible {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_window(ctx);
+        }
+        let state = {
+            let d = lock(&self.data);
+            let enforcement = d.status.as_ref().map(|s| &s.enforcement);
+            crate::tray::TrayState {
+                connected: d.connected,
+                paused: enforcement.filter(|e| e.enforcing).map(|e| e.paused),
+                down: d.overview.as_ref().map_or(0, |o| o.system.rate_down),
+                up: d.overview.as_ref().map_or(0, |o| o.system.rate_up),
+                notifications: d.notify.enabled,
+            }
+        };
+        if let Some(tray) = &mut self.tray {
+            tray.update(state);
+        }
+    }
+}
+
 impl eframe::App for NwlApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drive_tray(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         egui::Panel::top("header").show(ui, |ui| {

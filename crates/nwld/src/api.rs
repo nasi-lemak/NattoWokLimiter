@@ -58,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/rules", get(list_rules).post(add_rule))
         .route("/api/rules/:id", put(replace_rule).delete(remove_rule))
         .route("/api/rules/:id/move", post(move_rule))
+        .route("/api/pause", post(pause))
         .route("/api/quotas", get(quotas))
         .route("/api/events", get(events))
         .route("/api/usage", get(usage))
@@ -175,6 +176,18 @@ async fn remove_rule(State(s): State<AppState>, Path(id): Path<u64>) -> Response
         }
         Err(e) => rule_error(e),
     }
+}
+
+#[derive(Deserialize)]
+struct PauseBody {
+    paused: bool,
+}
+
+/// Pauses or resumes all rules.
+async fn pause(State(s): State<AppState>, Json(body): Json<PauseBody>) -> Response {
+    s.engine().set_paused(body.paused);
+    s.reapply();
+    Json(s.engine().status.clone()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -331,6 +344,12 @@ mod tests {
 
         let (_, events) = call(&app, "GET", "/api/events", "localhost", false, "").await;
         assert_eq!(events.as_array().unwrap().len(), 3);
+
+        let (code, _) = call(&app, "POST", "/api/pause", "localhost", false, r#"{"paused":true}"#).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "pausing needs the CSRF header too");
+        let (code, status) = call(&app, "POST", "/api/pause", "localhost", true, r#"{"paused":true}"#).await;
+        assert_eq!((code, status["paused"].as_bool()), (StatusCode::OK, Some(true)));
+        assert_eq!(wake.try_recv(), Ok(Wake::Reapply));
     }
 
     #[tokio::test]

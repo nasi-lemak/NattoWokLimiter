@@ -33,6 +33,8 @@ pub struct Engine {
     store: Store,
     /// Rules as configured.
     pub rules: RuleSet,
+    /// What the enforcer gets while paused.
+    no_rules: RuleSet,
     /// `rules` with schedules applied for the current local time; this is
     /// what decisions, quotas and enforcement use.
     effective: RuleSet,
@@ -107,6 +109,7 @@ impl Engine {
             remotes: RemoteTracker::new(1000),
             spikes: SpikeDetector::default(),
             effective: rules.clone(),
+            no_rules: RuleSet::default(),
             clock: None,
             warned: HashMap::new(),
             quotas_primed: false,
@@ -268,7 +271,20 @@ impl Engine {
     }
 
     pub fn policy(&self) -> Policy<'_> {
+        if self.status.paused {
+            return Policy { rules: &self.no_rules, exhausted_quotas: &[], snapshot: &self.snapshot };
+        }
         Policy { rules: &self.effective, exhausted_quotas: &self.exhausted, snapshot: &self.snapshot }
+    }
+
+    /// Pauses or resumes all rules. While paused nothing is blocked or
+    /// limited, but traffic and quotas are still counted. Not persisted: a
+    /// restart resumes, so a forgotten pause cannot outlive the daemon.
+    pub fn set_paused(&mut self, paused: bool) {
+        if self.status.paused != paused {
+            self.status.paused = paused;
+            self.push_event(if paused { EventKind::Paused } else { EventKind::Resumed });
+        }
     }
 
     pub fn record_enforcement(&mut self, result: Result<EnforceReport, String>) {
@@ -765,6 +781,39 @@ mod tests {
         assert_eq!(e.policy().exhausted_quotas.len(), 1, "still enforced");
         assert_eq!(reached(&e), 0, "but not announced again");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pausing_lifts_all_enforcement_but_keeps_counting() {
+        let mut e = Engine::new(temp_store("pause"), 10).unwrap();
+        e.add_rule(serde_json::from_str(r#"{"match":{"app":"steam"},"action":{"type":"block"}}"#).unwrap())
+            .unwrap();
+        e.add_rule(
+            serde_json::from_str(
+                r#"{"match":{"app":"steam"},"action":{"type":"quota","limit":10,"period":"day"}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        e.ingest(snap(1000, 0, 100), at(12));
+        assert_eq!(e.policy().rules.enabled().count(), 2);
+        assert_eq!(e.policy().exhausted_quotas.len(), 1);
+
+        e.set_paused(true);
+        assert!(e.policy().rules.enabled().next().is_none());
+        assert!(e.policy().exhausted_quotas.is_empty());
+        e.ingest(snap(2000, 0, 300), at(12));
+        assert_eq!(e.quota_status()[0].used, 300, "still counted while paused");
+
+        e.set_paused(false);
+        assert_eq!(e.policy().rules.enabled().count(), 2);
+        let toggles = e
+            .events_since(0)
+            .iter()
+            .filter(|ev| matches!(ev.kind, EventKind::Paused | EventKind::Resumed))
+            .count();
+        assert_eq!(toggles, 2);
     }
 
     #[test]

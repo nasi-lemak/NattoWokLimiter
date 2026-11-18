@@ -45,8 +45,9 @@ trade-offs stay visible.
 
 ## Product
 
-- **Tray icon** for the desktop app (done: `nattowok`, native Rust/egui), with a live speed meter and
-  quick block/limit, plus desktop notifications for events.
+- **Quick actions in the tray.** The tray icon (live speed meter, pause/resume, close to tray) and
+  desktop notifications are done. Next: block or limit the busiest apps straight from the tray menu,
+  and act on a notification (e.g. "Block" on a new-app alert).
 - **Remote management** with authentication (token or mTLS), and several machines in one dashboard.
 - **Packages**: deb/rpm/AUR, MSI with a service installer, Homebrew.
 - **Config import** from NetLimiter and GlassWire rule exports, where feasible.
