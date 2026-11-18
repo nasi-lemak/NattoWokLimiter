@@ -256,10 +256,7 @@ mod tests {
 
         let socks = match dump_all() {
             Ok(s) => s,
-            Err(e) => {
-                eprintln!("sock_diag unavailable in this environment, skipping: {e}");
-                return;
-            }
+            Err(e) => return crate::linux::skip_unless_required(&format!("sock_diag: {e}")),
         };
         let client_local = client.local_addr().unwrap();
         let c = socks

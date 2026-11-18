@@ -641,11 +641,11 @@ mod tests {
     #[test]
     fn counts_udp_and_records_owners_even_after_close() {
         let _guard = test_lock();
-        let Some(mount) = cgroup2_mount() else { return eprintln!("no cgroup2, skipping") };
+        let Some(mount) = cgroup2_mount() else { return crate::linux::skip_unless_required("cgroup2") };
         let hooks = [BPF_CGROUP_INET_SOCK_CREATE, BPF_CGROUP_INET_INGRESS, BPF_CGROUP_INET_EGRESS];
         let mut counters = match SocketCounters::attach(Path::new(&mount), true) {
             Ok(c) => c,
-            Err(e) => return eprintln!("eBPF unavailable here, skipping: {e}"),
+            Err(e) => return crate::linux::skip_unless_required(&format!("eBPF: {e}")),
         };
         let during: Vec<u32> = hooks.iter().map(|&h| attached(&mount, h)).collect();
         assert!(counters.tracks_creators(), "kernel too old for owner tracking?");
@@ -690,8 +690,11 @@ mod tests {
     #[test]
     fn loopback_is_skipped_unless_requested() {
         let _guard = test_lock();
-        let Some(mount) = cgroup2_mount() else { return };
-        let Ok(counters) = SocketCounters::attach(Path::new(&mount), false) else { return };
+        let Some(mount) = cgroup2_mount() else { return crate::linux::skip_unless_required("cgroup2") };
+        let counters = match SocketCounters::attach(Path::new(&mount), false) {
+            Ok(c) => c,
+            Err(e) => return crate::linux::skip_unless_required(&format!("eBPF: {e}")),
+        };
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
         let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
         tx.connect(rx.local_addr().unwrap()).unwrap();

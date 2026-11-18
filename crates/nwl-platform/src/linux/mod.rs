@@ -15,6 +15,17 @@ pub mod sockdiag;
 
 pub use cgroup::CgroupManager;
 
+/// Skips a test that needs kernel features or privileges this environment
+/// lacks, unless `NWL_E2E=1` says they must be there (as in CI), where a
+/// skip would hide a broken setup: then it fails.
+#[cfg(test)]
+pub(crate) fn skip_unless_required(why: &str) {
+    if std::env::var("NWL_E2E").as_deref() == Ok("1") {
+        panic!("required by NWL_E2E=1 but unavailable: {why}");
+    }
+    eprintln!("skipping: {why}");
+}
+
 use crate::{EnforceReport, Enforcer, EnforcerOptions, Error, Monitor, MonitorOptions, Policy, Result};
 use nwl_core::model::{ConnKey, Connection, ProcessInfo, Protocol, Snapshot};
 use std::collections::{HashMap, HashSet};
@@ -336,7 +347,7 @@ mod tests {
         let opts = MonitorOptions { ebpf: true, count_loopback: true };
         let mut monitor = LinuxMonitor::new(&opts).unwrap();
         if monitor.counters.is_none() {
-            return eprintln!("eBPF unavailable here, skipping");
+            return skip_unless_required("eBPF counters");
         }
         monitor.snapshot().unwrap();
         {
