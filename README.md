@@ -85,8 +85,26 @@ sudo ./target/release/nwld
 On Windows, run `nwld.exe` from an elevated prompt. Without elevation it still monitors connections,
 but per-connection byte counters and enforcement need Administrator.
 
-Install as a service on Linux: copy the binaries to `/usr/local/bin` and use
-[`packaging/nwld.service`](packaging/nwld.service); [`packaging/nattowok.desktop`](packaging/nattowok.desktop) adds the desktop app to the application menu.
+### Install on Linux
+
+Packages contain the service, the CLI and the desktop app, plus the systemd unit (enabled and started
+on install), the application-menu entry and icons. CI builds them on every push (download the
+`linux-packages` artifact), and version tags attach them to a GitHub release. Or build them yourself:
+
+```sh
+cargo install cargo-deb cargo-generate-rpm
+cargo build --release --workspace
+cargo deb -p nwld --no-build            # target/debian/nattowok_*.deb
+cargo generate-rpm -p crates/nwld       # target/generate-rpm/nattowok-*.rpm
+
+sudo apt install ./target/debian/nattowok_*.deb           # Debian, Ubuntu, Mint, ...
+sudo dnf install ./target/generate-rpm/nattowok-*.rpm     # Fedora, openSUSE, ...
+```
+
+Then start **NattoWok Limiter** from the application menu. Its icon sits in the tray, and closing the
+window keeps it there. Without packages, copy the three binaries to `/usr/bin` and install
+[`packaging/nwld.service`](packaging/nwld.service) and [`packaging/nattowok.desktop`](packaging/nattowok.desktop).
+Windows builds (`nattowok-windows-x86_64.zip`) come from CI the same way.
 
 ### CLI
 

@@ -29,3 +29,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = { version = "0.3", default-features = false }
 dns-lookup = "2"
 ureq = { version = "2", default-features = false, features = ["json"] }
+
+[profile.release]
+# Smaller binaries for packages; panics still print a message.
+strip = true

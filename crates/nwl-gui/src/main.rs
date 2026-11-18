@@ -40,7 +40,11 @@ fn main() -> eframe::Result {
             .with_title("NattoWok Limiter")
             .with_app_id("nattowok")
             .with_inner_size([1180.0, 820.0])
-            .with_min_inner_size([760.0, 520.0]),
+            .with_min_inner_size([760.0, 520.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../packaging/icons/nattowok-64.png"))
+                    .expect("bundled icon is a valid PNG"),
+            ),
         ..Default::default()
     };
     eframe::run_native(

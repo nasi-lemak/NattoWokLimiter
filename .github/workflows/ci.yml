@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,6 +31,8 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write # attach binaries to releases on version tags
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +41,56 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Release binaries
+        run: |
+          cargo build --release --workspace
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/nwld.exe, target/release/nwl.exe, target/release/nattowok.exe, README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath nattowok-windows-x86_64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: nattowok-windows-x86_64.zip
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nattowok-windows-x86_64.zip
+
+  packages:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach packages to releases on version tags
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked cargo-deb cargo-generate-rpm
+      - run: cargo build --release --workspace
+      - run: cargo deb -p nwld --no-build
+      - run: cargo generate-rpm -p crates/nwld
+      - name: Install the .deb, check the service starts, remove it
+        run: |
+          sudo apt-get install -y ./target/debian/*.deb
+          nwl --version && nwld --version && nattowok --version
+          sleep 3
+          systemctl is-active nwld
+          nwl status
+          sudo apt-get remove -y nattowok
+          ! systemctl is-active nwld
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
 
   macos:
     runs-on: macos-latest

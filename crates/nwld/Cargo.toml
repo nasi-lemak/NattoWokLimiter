@@ -1,6 +1,6 @@
 [package]
 name = "nwld"
-description = "NattoWokLimiter daemon: monitors traffic, enforces rules, serves the API and web dashboard."
+description = "NattoWokLimiter: per-application network monitor, firewall and bandwidth limiter (service, CLI and desktop app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,3 +27,79 @@ http-body-util = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Linux packages bundling the daemon, the CLI and the desktop app:
+#   cargo build --release --workspace
+#   cargo deb -p nwld --no-build
+#   cargo generate-rpm -p crates/nwld
+[package.metadata.deb]
+name = "nattowok"
+maintainer = "NattoWokLimiter project"
+copyright = "NattoWokLimiter contributors"
+section = "net"
+priority = "optional"
+extended-description = """\
+See which apps use your network, then block, limit or cap them. \
+Includes the nwld service (monitoring and enforcement with eBPF, cgroup v2 and nftables), \
+the nwl command-line client and the nattowok desktop app with tray icon and notifications. \
+The web dashboard is at http://127.0.0.1:7657 while the service runs."""
+depends = "$auto"
+recommends = "nftables, libxkbcommon-x11-0, libgl1"
+assets = [
+    ["target/release/nwld", "usr/bin/", "755"],
+    ["target/release/nwl", "usr/bin/", "755"],
+    ["target/release/nattowok", "usr/bin/", "755"],
+    ["../../packaging/nattowok.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/icons/nattowok.svg", "usr/share/icons/hicolor/scalable/apps/nattowok.svg", "644"],
+    ["../../packaging/icons/nattowok-32.png", "usr/share/icons/hicolor/32x32/apps/nattowok.png", "644"],
+    ["../../packaging/icons/nattowok-48.png", "usr/share/icons/hicolor/48x48/apps/nattowok.png", "644"],
+    ["../../packaging/icons/nattowok-64.png", "usr/share/icons/hicolor/64x64/apps/nattowok.png", "644"],
+    ["../../packaging/icons/nattowok-128.png", "usr/share/icons/hicolor/128x128/apps/nattowok.png", "644"],
+    ["../../packaging/icons/nattowok-256.png", "usr/share/icons/hicolor/256x256/apps/nattowok.png", "644"],
+    ["../../README.md", "usr/share/doc/nattowok/README.md", "644"],
+]
+# Installs, enables and starts nwld.service; stops it on removal.
+maintainer-scripts = "../../packaging/debian"
+systemd-units = { unit-scripts = "../../packaging", unit-name = "nwld", enable = true, start = true }
+
+[package.metadata.generate-rpm]
+name = "nattowok"
+# RPM requires a License tag. The project has not chosen a license yet;
+# replace this (and add `license` to the workspace) once it has.
+license = "LicenseRef-NotYetLicensed"
+summary = "Per-application network monitor, firewall and bandwidth limiter"
+assets = [
+    { source = "target/release/nwld", dest = "/usr/bin/nwld", mode = "755" },
+    { source = "target/release/nwl", dest = "/usr/bin/nwl", mode = "755" },
+    { source = "target/release/nattowok", dest = "/usr/bin/nattowok", mode = "755" },
+    { source = "../../packaging/nwld.service", dest = "/usr/lib/systemd/system/nwld.service", mode = "644" },
+    { source = "../../packaging/nattowok.desktop", dest = "/usr/share/applications/nattowok.desktop", mode = "644" },
+    { source = "../../packaging/icons/nattowok.svg", dest = "/usr/share/icons/hicolor/scalable/apps/nattowok.svg", mode = "644" },
+    { source = "../../packaging/icons/nattowok-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/nattowok.png", mode = "644" },
+    { source = "../../packaging/icons/nattowok-48.png", dest = "/usr/share/icons/hicolor/48x48/apps/nattowok.png", mode = "644" },
+    { source = "../../packaging/icons/nattowok-64.png", dest = "/usr/share/icons/hicolor/64x64/apps/nattowok.png", mode = "644" },
+    { source = "../../packaging/icons/nattowok-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/nattowok.png", mode = "644" },
+    { source = "../../packaging/icons/nattowok-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/nattowok.png", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/nattowok/README.md", mode = "644", doc = true },
+]
+# The equivalent of %systemd_post / %systemd_preun / %systemd_postun_with_restart.
+post_install_script = """
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+    if [ $1 -eq 1 ]; then systemctl enable --now nwld.service || :; fi
+fi
+"""
+pre_uninstall_script = """
+if [ $1 -eq 0 ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now nwld.service || :
+fi
+"""
+post_uninstall_script = """
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+    if [ $1 -ge 1 ]; then systemctl try-restart nwld.service || :; fi
+fi
+"""
+
+[package.metadata.generate-rpm.recommends]
+nftables = "*"

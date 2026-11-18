@@ -4,7 +4,7 @@ Documentation=https://github.com/nasi-lemak/NattoWokLimiter
 After=network.target nftables.service
 
 [Service]
-ExecStart=/usr/local/bin/nwld
+ExecStart=/usr/bin/nwld
 Restart=on-failure
 # nwld moves processes of targeted apps into child cgroups and manages its
 # own nftables table; it needs root. The dashboard listens on 127.0.0.1:7657.
