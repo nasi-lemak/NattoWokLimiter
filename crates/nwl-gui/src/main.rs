@@ -3,6 +3,7 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod actions;
 mod app;
 mod client;
 mod data;

@@ -6,8 +6,9 @@
 //! freedesktop notification service on Linux, toasts on Windows, the
 //! Notification Center on macOS).
 
+use crate::actions::QuickAction;
 use nwl_core::api::EventKind;
-use nwl_core::model::Direction;
+use nwl_core::model::{AppId, Direction};
 use nwl_core::rate::format_bytes;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -130,6 +131,60 @@ pub fn text(kind: &EventKind) -> Option<(String, String)> {
         | EventKind::Paused
         | EventKind::Resumed => return None,
     })
+}
+
+/// A button on a notification: action key, label, what it does.
+pub type Button = (&'static str, &'static str, QuickAction);
+
+/// The app an event is about and the buttons offered for it.
+pub fn buttons(kind: &EventKind) -> Option<(AppId, String, Vec<Button>)> {
+    match kind {
+        EventKind::NewApp { app, name } => {
+            Some((app.clone(), name.clone(), vec![("block", "Block", QuickAction::Block)]))
+        }
+        EventKind::TrafficSpike { app, name, .. } => Some((
+            app.clone(),
+            name.clone(),
+            vec![
+                ("block", "Block", QuickAction::Block),
+                ("limit", "Limit to 1 MB/s", QuickAction::Limit(1_000_000)),
+            ],
+        )),
+        _ => None,
+    }
+}
+
+/// Shows a notification with buttons; `on_click` runs on a background
+/// thread with the chosen button's action. Buttons need the freedesktop
+/// notification service; elsewhere the notification is shown without them.
+pub fn show_with_buttons(
+    title: &str,
+    body: &str,
+    buttons: Vec<Button>,
+    on_click: impl FnOnce(QuickAction) + Send + 'static,
+) -> Result<(), String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut n = notify_rust::Notification::new();
+        n.appname("NattoWok Limiter").summary(title).body(body).icon("network-transmit-receive");
+        for (key, label, _) in &buttons {
+            n.action(key, label);
+        }
+        let handle = n.show().map_err(|e| e.to_string())?;
+        std::thread::spawn(move || {
+            handle.wait_for_action(|key| {
+                if let Some((_, _, action)) = buttons.into_iter().find(|(k, _, _)| *k == key) {
+                    on_click(action);
+                }
+            })
+        });
+        Ok(())
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = (buttons, on_click);
+        show(title, body)
+    }
 }
 
 /// Shows a system notification.

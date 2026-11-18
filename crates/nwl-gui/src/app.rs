@@ -509,15 +509,10 @@ impl NwlApp {
             let a = &apps[i];
             match what {
                 "block" => {
-                    let _ = match a.block_rule {
-                        Some(id) => self.act("DELETE", &format!("/api/rules/{id}"), None, &format!("Unblocked {}", a.name)),
-                        None => self.act(
-                            "POST",
-                            "/api/rules",
-                            Some(json!({"name": format!("Block {}", a.name), "match": {"app": a.app}, "action": {"type": "block"}})),
-                            &format!("Blocked {}", a.name),
-                        ),
-                    };
+                    use crate::actions::QuickAction;
+                    let action =
+                        if a.block_rule.is_some() { QuickAction::Unblock } else { QuickAction::Block };
+                    self.quick_action(&a.into(), &action);
                 }
                 "limit" => {
                     let (down, up) = match &limit_rules[i] {
@@ -1378,7 +1373,40 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
         });
 }
 
+/// The apps offered in the tray: every app with a one-click block or limit
+/// (so it can be undone there), then the busiest by session traffic; sorted
+/// by name so the menu does not reshuffle while it is open.
+fn tray_apps(d: &crate::data::Data) -> Vec<crate::tray::TrayApp> {
+    let mut apps: Vec<&AppView> = d.apps().iter().collect();
+    apps.sort_by_key(|a| {
+        let ruled = a.block_rule.is_some() || a.limit_rule.is_some();
+        (!ruled, std::cmp::Reverse(a.total_up + a.total_down))
+    });
+    let mut picked: Vec<crate::tray::TrayApp> = apps
+        .into_iter()
+        .take(crate::tray::MENU_APPS)
+        .map(|a| {
+            let limit = match d.rule(a.limit_rule).map(|r| &r.action) {
+                Some(nwl_core::rules::Action::Limit { download, upload }) => {
+                    download.or(*upload).map(|r| r.0)
+                }
+                _ => None,
+            };
+            crate::tray::TrayApp { target: a.into(), down: a.rate_down, up: a.rate_up, limit }
+        })
+        .collect();
+    picked.sort_by_key(|a| a.target.name.to_lowercase());
+    picked
+}
+
 impl NwlApp {
+    /// Runs a one-click action (block, limit, ...) on an app.
+    fn quick_action(&self, target: &crate::actions::Target, action: &crate::actions::QuickAction) {
+        if let Some(r) = crate::actions::request(target, action) {
+            let _ = self.act(r.method, &r.path, r.body, &r.done);
+        }
+    }
+
     fn show_window(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -1416,6 +1444,7 @@ impl NwlApp {
                         d.toast = Some((e, false, Instant::now()));
                     }
                 }
+                crate::tray::TrayCommand::App(target, action) => self.quick_action(&target, &action),
                 crate::tray::TrayCommand::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1437,6 +1466,7 @@ impl NwlApp {
                 down: d.overview.as_ref().map_or(0, |o| o.system.rate_down),
                 up: d.overview.as_ref().map_or(0, |o| o.system.rate_up),
                 notifications: d.notify.enabled,
+                apps: tray_apps(&d),
             }
         };
         if let Some(tray) = &mut self.tray {

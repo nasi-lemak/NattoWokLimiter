@@ -81,6 +81,23 @@ pub fn lock(data: &Shared) -> std::sync::MutexGuard<'_, Data> {
     data.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Carries out a notification button: the app's rules as they are now
+/// decide the request, so a second click never stacks a duplicate rule.
+fn run_action(client: &Client, data: &Shared, app: AppId, name: String, action: crate::actions::QuickAction) {
+    let target = lock(data)
+        .apps()
+        .iter()
+        .find(|a| a.app == app)
+        .map(crate::actions::Target::from)
+        .unwrap_or(crate::actions::Target { app, name, block_rule: None, limit_rule: None });
+    let Some(r) = crate::actions::request(&target, &action) else { return };
+    let toast = match client.call(r.method, &r.path, r.body) {
+        Ok(_) => (r.done, true, Instant::now()),
+        Err(e) => (e, false, Instant::now()),
+    };
+    lock(data).toast = Some(toast);
+}
+
 pub fn spawn_poller(
     client: Client,
     data: Shared,
@@ -178,7 +195,9 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
     let mut notifications = Vec::new();
     for e in events {
         if e.id > notify_after && d.notify.wants(&e.kind) {
-            notifications.extend(crate::notify::text(&e.kind));
+            if let Some((title, body)) = crate::notify::text(&e.kind) {
+                notifications.push((title, body, crate::notify::buttons(&e.kind)));
+            }
         }
         d.last_event = d.last_event.max(e.id);
         d.events.insert(0, e);
@@ -204,8 +223,16 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
     drop(d);
     // Shown outside the lock: talking to the notification service can take
     // a moment and the UI must not wait for it.
-    for (title, body) in notifications {
-        let result = crate::notify::show(&title, &body);
+    for (title, body, buttons) in notifications {
+        let result = match buttons {
+            Some((app, name, buttons)) => {
+                let (client, data) = (client.clone(), data.clone());
+                crate::notify::show_with_buttons(&title, &body, buttons, move |action| {
+                    run_action(&client, &data, app, name, action)
+                })
+            }
+            None => crate::notify::show(&title, &body),
+        };
         lock(data).notify_error = result.err();
     }
 }

@@ -51,6 +51,8 @@ There are three front ends over the same daemon:
 | Traffic spike detection ("Dropbox is uploading at 8 MB/s, usually 12 kB/s") | ✅ | ✅ |
 | Desktop notifications for new apps, spikes, quotas and enforcement problems, each switchable | ✅ | ✅ |
 | Tray icon: live speed meter, pause/resume all rules, close to tray | ✅ StatusNotifierItem (no GTK) | ✅ native |
+| Tray quick actions: block, unblock and limit the busiest apps from the menu | ✅ | ✅ |
+| Buttons on notifications: "Block" a new app, "Block" or "Limit to 1 MB/s" on a spike | ✅ | ❌ (plain notifications) |
 | Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
 
