@@ -36,6 +36,15 @@ impl Client {
     }
 
     /// Sends a request; errors carry the daemon's message when it has one.
+    /// A non-JSON response body (CSV).
+    pub fn get_text(&self, path: &str) -> Result<String, String> {
+        match self.agent.get(&format!("{}{path}", self.base)).call() {
+            Ok(r) => r.into_string().map_err(|e| e.to_string()),
+            Err(ureq::Error::Status(code, _)) => Err(format!("daemon returned {code}")),
+            Err(e) => Err(format!("cannot reach nwld at {}: {e}", self.base)),
+        }
+    }
+
     pub fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
         let req = self.agent.request(method, &format!("{}{path}", self.base)).set("x-nwl-client", "desktop");
         let resp = match body {

@@ -2,7 +2,8 @@
 //! network. The UI reads [`Data`] and sends [`Request`]s.
 
 use crate::client::Client;
-use nwl_core::api::{AppView, ConnView, Event, Overview, RemoteView, Status, UsageDay};
+use nwl_core::api::{AppView, ConnView, Event, HistoryView, Overview, RemoteView, Status, UsageDay};
+use nwl_core::history::Range;
 use nwl_core::model::AppId;
 use nwl_core::rules::Rule;
 use std::collections::{HashMap, VecDeque};
@@ -37,6 +38,9 @@ pub struct Data {
     /// Remote hosts of the app whose details are open.
     pub remotes: Vec<RemoteView>,
     pub remotes_app: Option<AppId>,
+    /// The history view the History tab shows, and what it asked for.
+    pub history: Option<HistoryView>,
+    pub history_query: Option<(Range, Option<AppId>)>,
     /// Result of the last action, shown as a toast.
     pub toast: Option<(String, bool, Instant)>,
     last_mono: u64,
@@ -73,6 +77,8 @@ pub enum Request {
     Usage(usize),
     /// Track the remote hosts of this app (or stop).
     Remotes(Option<AppId>),
+    /// Fetch (and keep refreshing) this history view, or stop.
+    History(Option<(Range, Option<AppId>)>),
 }
 
 pub type Shared = Arc<Mutex<Data>>;
@@ -108,8 +114,9 @@ pub fn spawn_poller(
         .name("poller".into())
         .spawn(move || {
             let mut usage_due = Instant::now();
+            let mut history_due = Instant::now();
             loop {
-                poll(&client, &data, &mut usage_due);
+                poll(&client, &data, &mut usage_due, &mut history_due);
                 repaint();
                 match rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(Request::Usage(days)) => {
@@ -121,6 +128,12 @@ pub fn spawn_poller(
                         d.remotes.clear();
                         d.remotes_app = app;
                     }
+                    Ok(Request::History(query)) => {
+                        let mut d = lock(&data);
+                        d.history = None;
+                        d.history_query = query;
+                        history_due = Instant::now();
+                    }
                     Ok(Request::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
@@ -130,7 +143,7 @@ pub fn spawn_poller(
     tx
 }
 
-fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
+fn poll(client: &Client, data: &Shared, usage_due: &mut Instant, history_due: &mut Instant) {
     let overview: Overview = match client.get("/api/overview") {
         Ok(o) => o,
         Err(e) => {
@@ -162,6 +175,23 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
     let remotes: Option<Vec<RemoteView>> = remotes_app.as_ref().and_then(|app| {
         client.get(&format!("/api/remotes?limit=20&app={}", crate::client::encode(&app.0))).ok()
     });
+    // History changes slowly (minute buckets): refresh every 10 s.
+    let history_query = lock(data).history_query.clone();
+    let history: Option<HistoryView> = match &history_query {
+        Some((range, app)) if Instant::now() >= *history_due => {
+            *history_due = Instant::now() + Duration::from_secs(10);
+            let range = serde_json::to_value(range)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            let mut path = format!("/api/history?range={range}");
+            if let Some(a) = app {
+                path += &format!("&app={}", crate::client::encode(&a.0));
+            }
+            client.get(&path).ok()
+        }
+        _ => None,
+    };
     let usage_days = lock(data).usage_days.max(7);
     let usage: Option<Vec<UsageDay>> = if Instant::now() >= *usage_due {
         *usage_due = Instant::now() + Duration::from_secs(10);
@@ -218,6 +248,9 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant) {
     // Ignore a response for an app that is no longer selected.
     if let Some(r) = remotes.filter(|_| d.remotes_app == remotes_app) {
         d.remotes = r;
+    }
+    if let Some(h) = history.filter(|_| d.history_query == history_query) {
+        d.history = Some(h);
     }
     d.overview = Some(overview);
     drop(d);

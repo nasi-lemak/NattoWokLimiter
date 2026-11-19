@@ -37,7 +37,8 @@ trade-offs stay visible.
 
 - **More alerts.** Desktop notifications are done (new apps, traffic spikes, quota at 80% and 100%,
   enforcement problems). Next: changed binary hashes, per-app spike sensitivity, and webhooks.
-- **Long-term graphs.** Hourly resolution, per app and per remote, with CSV/JSON export.
+- **Long-term graphs.** Traffic history is done (whole machine or per app, minute points for a day
+  and hourly points for 90 days, CSV export). Next: history per remote host, and longer retention.
 - **ASN and country for remote hosts.** "Who is this app talking to?" is done (hosts per app with
   bytes, ports and protocols). Next: ASN and country, and keeping it across restarts.
 - **Binary identity.** Hash and code-signature checks so a rule for `firefox` doesn't follow a
@@ -48,5 +49,6 @@ trade-offs stay visible.
 - **Notification buttons on Windows and macOS.** Tray quick actions and notification buttons are done
   on Linux; Windows toasts and macOS notifications show without buttons for now.
 - **Remote management** with authentication (token or mTLS), and several machines in one dashboard.
-- **Packages**: deb/rpm/AUR, MSI with a service installer, Homebrew.
+- **Packages.** deb and rpm are done (built by CI, attached to releases). Next: AUR, an MSI with a
+  service installer, Homebrew.
 - **Config import** from NetLimiter and GlassWire rule exports, where feasible.

@@ -63,6 +63,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(events))
         .route("/api/usage", get(usage))
         .route("/api/remotes", get(remotes))
+        .route("/api/history", get(history))
+        .route("/api/history.csv", get(history_csv))
+        .route("/api/usage.csv", get(usage_csv))
         .route("/api/stream", get(stream))
         .layer(middleware::from_fn(guard))
         .with_state(state)
@@ -231,6 +234,63 @@ async fn remotes(State(s): State<AppState>, Query(q): Query<RemotesQuery>) -> im
 }
 
 #[derive(Deserialize)]
+struct HistoryQuery {
+    range: Option<String>,
+    app: Option<String>,
+}
+
+impl HistoryQuery {
+    /// The requested range (default: day), or `None` if it is not one.
+    fn range(&self) -> Option<nwl_core::history::Range> {
+        match &self.range {
+            None => Some(nwl_core::history::Range::Day),
+            Some(r) => nwl_core::history::Range::parse(r),
+        }
+    }
+}
+
+fn bad_range() -> Response {
+    error(StatusCode::BAD_REQUEST, "range must be hour, day, week, month or quarter")
+}
+
+async fn history(State(s): State<AppState>, Query(q): Query<HistoryQuery>) -> Response {
+    match q.range() {
+        Some(range) => Json(s.engine().history(range, q.app.as_deref())).into_response(),
+        None => bad_range(),
+    }
+}
+
+/// A CSV file download.
+fn csv(name: String, body: String) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn history_csv(State(s): State<AppState>, Query(q): Query<HistoryQuery>) -> Response {
+    match q.range() {
+        Some(range) => {
+            let name = format!(
+                "nattowok-history-{}.csv",
+                serde_json::to_value(range).unwrap().as_str().unwrap_or("range")
+            );
+            csv(name, s.engine().history_csv(range, q.app.as_deref()))
+        }
+        None => bad_range(),
+    }
+}
+
+async fn usage_csv(State(s): State<AppState>, Query(q): Query<UsageQuery>) -> Response {
+    let days = q.days.unwrap_or(30).clamp(1, 400);
+    csv(format!("nattowok-usage-{days}d.csv"), s.engine().usage_csv(days))
+}
+
+#[derive(Deserialize)]
 struct UsageQuery {
     days: Option<usize>,
 }
@@ -359,6 +419,11 @@ mod tests {
         serde_json::from_value::<nwl_core::api::Status>(status).unwrap();
         let (_, overview) = call(&app, "GET", "/api/overview", "localhost", false, "").await;
         serde_json::from_value::<nwl_core::api::Overview>(overview).unwrap();
+        let (_, history) = call(&app, "GET", "/api/history?range=week", "localhost", false, "").await;
+        let history: nwl_core::api::HistoryView = serde_json::from_value(history).unwrap();
+        assert_eq!((history.points.len(), history.step_secs), (168, 3600));
+        let (code, _) = call(&app, "GET", "/api/history?range=decade", "localhost", false, "").await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
         let (_, remotes) = call(&app, "GET", "/api/remotes?limit=5", "localhost", false, "").await;
         serde_json::from_value::<Vec<nwl_core::api::RemoteView>>(remotes).unwrap();
         let (_, conns) = call(&app, "GET", "/api/connections", "localhost", false, "").await;

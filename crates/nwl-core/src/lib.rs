@@ -6,11 +6,13 @@
 //! * [`quota`]: per-period data caps.
 //! * [`rate`]: parsing and formatting of sizes and rates.
 //! * [`remotes`]: bytes per remote address per application.
+//! * [`history`]: long-term traffic history per minute and hour.
 //! * [`spikes`]: traffic spike detection per application.
 //! * [`api`]: request and response types of the daemon's HTTP API.
 
 pub mod accounting;
 pub mod api;
+pub mod history;
 pub mod model;
 pub mod quota;
 pub mod rate;

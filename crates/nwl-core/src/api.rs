@@ -157,6 +157,18 @@ pub struct Overview {
     pub last_event: u64,
 }
 
+/// `GET /api/history`: traffic over a time range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryView {
+    pub range: crate::history::Range,
+    /// Seconds each point covers.
+    pub step_secs: i64,
+    /// The machine's traffic, or one app's when filtered, oldest first.
+    pub points: Vec<crate::history::Point>,
+    /// Per-app totals over the range, most traffic first.
+    pub apps: Vec<UsageEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageDay {
     pub day: String,

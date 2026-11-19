@@ -151,6 +151,18 @@ enum Cmd {
         #[arg(long, default_value_t = 7)]
         days: usize,
     },
+    /// Traffic over time: totals, a chart and top apps; or CSV.
+    History {
+        /// hour, day, week, month or quarter (also 1h, 24h, 7d, 30d, 90d).
+        #[arg(long, default_value = "day")]
+        range: String,
+        /// Only this application (full path, as shown by `top`).
+        #[arg(long)]
+        app: Option<String>,
+        /// Print CSV (one row per time point and app) instead.
+        #[arg(long)]
+        csv: bool,
+    },
     /// Who apps talk to: remote hosts by traffic this session.
     Remotes {
         /// Only this application (full path, as shown by `top`).
@@ -196,6 +208,32 @@ impl Client {
     fn get(&self, path: &str) -> anyhow::Result<Value> {
         self.call("GET", path, None)
     }
+
+    /// A non-JSON response body (CSV).
+    fn get_text(&self, path: &str) -> anyhow::Result<String> {
+        match self.agent.get(&format!("{}{path}", self.base)).call() {
+            Ok(r) => Ok(r.into_string()?),
+            Err(ureq::Error::Status(code, r)) => {
+                let body: Value = r.into_json().unwrap_or(Value::Null);
+                bail!("daemon returned {code}: {}", body["error"].as_str().unwrap_or("request failed"))
+            }
+            Err(e) => {
+                Err(anyhow::Error::new(e)).with_context(|| format!("cannot reach nwld at {}", self.base))
+            }
+        }
+    }
+}
+
+/// A one-line bar chart of `values` at most `width` characters wide.
+fn bars(values: &[u64], width: usize) -> String {
+    const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let per = values.len().div_ceil(width.max(1)).max(1);
+    let merged: Vec<u64> = values.chunks(per).map(|c| c.iter().sum()).collect();
+    let max = merged.iter().copied().max().unwrap_or(0).max(1);
+    merged
+        .iter()
+        .map(|&v| if v == 0 { ' ' } else { BLOCKS[((v * 8).div_ceil(max)).clamp(1, 8) as usize] })
+        .collect()
 }
 
 fn u(v: &Value) -> u64 {
@@ -499,6 +537,48 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 .collect();
             println!("last {days} days\n");
             table(&["APP", "DOWN", "UP", "TOTAL"], &rows, &[1, 2, 3]);
+        }
+        Cmd::History { range, app, csv } => {
+            let mut query = format!("range={}", encode(&range));
+            if let Some(a) = &app {
+                query += &format!("&app={}", encode(a));
+            }
+            if csv {
+                print!("{}", c.get_text(&format!("/api/history.csv?{query}"))?);
+                return Ok(());
+            }
+            let h = c.get(&format!("/api/history?{query}"))?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&h)?);
+                return Ok(());
+            }
+            let points = h["points"].as_array().cloned().unwrap_or_default();
+            let ups: Vec<u64> = points.iter().map(|p| u(&p["up"])).collect();
+            let downs: Vec<u64> = points.iter().map(|p| u(&p["down"])).collect();
+            let (up, down) = (ups.iter().sum::<u64>(), downs.iter().sum::<u64>());
+            let who = app.as_deref().map_or("all traffic".to_string(), |a| a.to_string());
+            println!("{range}: {who}  down {}  up {}\n", format_bytes(down), format_bytes(up));
+            println!("down |{}|", bars(&downs, 72));
+            println!("up   |{}|\n", bars(&ups, 72));
+            if app.is_none() {
+                let rows: Vec<Vec<String>> = h["apps"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(15)
+                    .map(|a| {
+                        vec![
+                            a["name"].as_str().unwrap_or("").to_string(),
+                            format_bytes(u(&a["down"])),
+                            format_bytes(u(&a["up"])),
+                            format_bytes(u(&a["down"]) + u(&a["up"])),
+                        ]
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    table(&["APP", "DOWN", "UP", "TOTAL"], &rows, &[1, 2, 3]);
+                }
+            }
         }
         Cmd::Remotes { app, limit } => {
             let mut path = format!("/api/remotes?limit={limit}");

@@ -6,6 +6,7 @@ use eframe::egui::{self, Color32, RichText, Stroke, Ui};
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Bar, BarChart, Line, Plot};
 use nwl_core::api::{AppView, ConnView, EventKind};
+use nwl_core::history::Range;
 use nwl_core::model::{AppId, Direction, Protocol};
 use nwl_core::rate::{format_bytes, ByteSize, Rate};
 use nwl_core::rules::{Day, Period, Rule, TimeOfDay};
@@ -39,6 +40,7 @@ enum Tab {
     Apps,
     Connections,
     Rules,
+    History,
     Usage,
     Events,
 }
@@ -191,12 +193,20 @@ pub struct NwlApp {
     usage_days: usize,
     dark: bool,
     show_notify_settings: bool,
+    history_range: Range,
+    /// App the History tab is filtered to; `None` for all traffic.
+    history_app: Option<AppId>,
     /// The tray icon, where the desktop has a tray.
     tray: Option<crate::tray::Tray>,
     /// The window is hidden to the tray.
     hidden: bool,
     /// Quit was chosen: let the window close instead of hiding it.
     quitting: bool,
+    /// Started hidden: when to check that a tray host shows the icon, or
+    /// else show the window so the app is not unreachable.
+    startup_check: Option<Instant>,
+    /// Whether the app starts at login.
+    autostart: bool,
     /// Row order of the apps table last frame, and whether the pointer was
     /// over it: rows keep their place while the user aims at a button.
     app_order: Vec<AppId>,
@@ -204,7 +214,14 @@ pub struct NwlApp {
 }
 
 impl NwlApp {
-    pub fn new(ctx: &egui::Context, client: Client, data: Shared, poller: Sender<Request>) -> Self {
+    /// `start_hidden`: started at login, so stay in the tray (if there is one).
+    pub fn new(
+        ctx: &egui::Context,
+        client: Client,
+        data: Shared,
+        poller: Sender<Request>,
+        start_hidden: bool,
+    ) -> Self {
         let dark = ctx.global_style().visuals.dark_mode;
         let _ = poller.send(Request::Usage(30));
         Self {
@@ -221,11 +238,15 @@ impl NwlApp {
             usage_days: 30,
             dark,
             show_notify_settings: false,
+            history_range: Range::Day,
+            history_app: None,
             tray: {
                 let ctx = ctx.clone();
                 crate::tray::Tray::new(move || ctx.request_repaint())
             },
-            hidden: false,
+            hidden: start_hidden,
+            startup_check: start_hidden.then(Instant::now),
+            autostart: crate::autostart::enabled(),
             quitting: false,
             app_order: Vec::new(),
             freeze_order: false,
@@ -297,7 +318,7 @@ impl NwlApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("🔔").on_hover_text("Notifications").clicked() {
+                if ui.button("⚙").on_hover_text("Settings: notifications and startup").clicked() {
                     self.show_notify_settings = !self.show_notify_settings;
                 }
                 let icon = if self.dark { "☀" } else { "🌙" };
@@ -362,6 +383,7 @@ impl NwlApp {
                 d.connections.iter().filter(|c| c.conn.key.remote.is_some()).count(),
             ),
             (Tab::Rules, "Rules", d.rules.len()),
+            (Tab::History, "History", 0),
             (Tab::Usage, "Usage", 0),
             (Tab::Events, "Events", d.events.len()),
         ];
@@ -574,12 +596,14 @@ impl NwlApp {
         };
         let before = settings.clone();
         let mut test = false;
-        egui::Window::new("Notifications")
+        let mut autostart = self.autostart;
+        egui::Window::new("Settings")
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .anchor(egui::Align2::RIGHT_TOP, [-12.0, 56.0])
             .show(ctx, |ui| {
+                ui.heading("Notifications");
                 ui.checkbox(&mut settings.enabled, RichText::new("Show desktop notifications").strong());
                 ui.add_enabled_ui(settings.enabled, |ui| {
                     ui.indent("kinds", |ui| {
@@ -601,7 +625,17 @@ impl NwlApp {
                 if ui.button("Send a test notification").clicked() {
                     test = true;
                 }
+                ui.separator();
+                ui.heading("Startup");
+                ui.checkbox(&mut autostart, RichText::new("Start NattoWok Limiter when I log in").strong());
+                ui.weak("It starts in the tray. Without a tray, the window opens.");
             });
+        if autostart != self.autostart {
+            match crate::autostart::set(autostart) {
+                Ok(()) => self.autostart = autostart,
+                Err(e) => lock(&self.data).toast = Some((e, false, Instant::now())),
+            }
+        }
         if settings != before {
             let saved = settings.save();
             let mut d = lock(&self.data);
@@ -1074,6 +1108,181 @@ impl NwlApp {
             });
     }
 
+    /// Keeps the poller fetching exactly the history view on screen, and
+    /// nothing while the History tab is closed.
+    fn sync_history_query(&self) {
+        let wanted = (self.tab == Tab::History).then(|| (self.history_range, self.history_app.clone()));
+        if lock(&self.data).history_query != wanted {
+            let _ = self.poller.send(Request::History(wanted));
+        }
+    }
+
+    fn history_tab(&mut self, ui: &mut Ui) {
+        let (view, apps): (Option<nwl_core::api::HistoryView>, Vec<(AppId, String)>) = {
+            let d = lock(&self.data);
+            let mut apps: Vec<(AppId, String)> =
+                d.apps().iter().map(|a| (a.app.clone(), a.name.clone())).collect();
+            for a in d.history.iter().flat_map(|h| &h.apps) {
+                if !apps.iter().any(|(id, _)| *id == a.app) {
+                    apps.push((a.app.clone(), a.name.clone()));
+                }
+            }
+            apps.sort_by_key(|(_, n)| n.to_lowercase());
+            (d.history.clone(), apps)
+        };
+        ui.horizontal(|ui| {
+            for range in Range::ALL {
+                let short = match range {
+                    Range::Hour => "1 hour",
+                    Range::Day => "24 hours",
+                    Range::Week => "7 days",
+                    Range::Month => "30 days",
+                    Range::Quarter => "90 days",
+                };
+                if ui.selectable_label(self.history_range == range, short).clicked() {
+                    self.history_range = range;
+                }
+            }
+            ui.separator();
+            let selected =
+                self.history_app.as_ref().map_or("All traffic".to_string(), |a| a.display_name().to_string());
+            egui::ComboBox::from_id_salt("history-app").selected_text(selected).width(180.0).show_ui(
+                ui,
+                |ui| {
+                    ui.selectable_value(&mut self.history_app, None, "All traffic");
+                    for (id, name) in &apps {
+                        ui.selectable_value(&mut self.history_app, Some(id.clone()), name)
+                            .on_hover_text(&id.0);
+                    }
+                },
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("Export CSV")
+                    .on_hover_text("Save this range as CSV in your Downloads folder")
+                    .clicked()
+                {
+                    self.export_history();
+                }
+            });
+        });
+        self.sync_history_query();
+        let Some(view) = view.filter(|v| v.range == self.history_range) else {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| ui.spinner());
+            return;
+        };
+        let (up, down) = view.points.iter().fold((0, 0), |(u, d), p| (u + p.up, d + p.down));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.strong(format!("{}:", self.history_range.label()));
+            ui.label(RichText::new(format!("↓ {}", format_bytes(down))).color(DOWN));
+            ui.label(RichText::new(format!("↑ {}", format_bytes(up))).color(UP));
+            ui.weak(format!("· one point per {}", step_label(view.step_secs)));
+        });
+        let step = view.step_secs;
+        let to_points = |pick: fn(&nwl_core::history::Point) -> u64| -> Vec<[f64; 2]> {
+            view.points.iter().map(|p| [p.t as f64, pick(p) as f64]).collect()
+        };
+        Plot::new("history")
+            .height(220.0)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .include_y(0.0)
+            .y_axis_formatter(|m, _| if m.value <= 0.0 { "0".into() } else { format_bytes(m.value as u64) })
+            .x_axis_formatter(move |m, _| local_time_label(m.value as i64, step))
+            .label_formatter(move |h| match h {
+                egui_plot::HoverPosition::NearDataPoint { plot_name, position, .. } => Some(format!(
+                    "{}\n{plot_name}: {}",
+                    local_time_label(position.x as i64, step.min(3600)),
+                    format_bytes(position.y as u64)
+                )),
+                _ => None,
+            })
+            .show(ui, |p| {
+                p.line(Line::new("Download", to_points(|p| p.down)).color(DOWN).fill(0.0).width(1.6));
+                p.line(Line::new("Upload", to_points(|p| p.up)).color(UP).fill(0.0).width(1.6));
+            });
+        if self.history_app.is_some() || view.apps.is_empty() {
+            return;
+        }
+        ui.add_space(6.0);
+        ui.weak("Click an app to see its own history.");
+        let grand = view.apps.iter().map(|a| a.up + a.down).sum::<u64>().max(1);
+        let mut pick: Option<AppId> = None;
+        // Plain text, so a click anywhere on a row selects that app.
+        ui.style_mut().interaction.selectable_labels = false;
+        TableBuilder::new(ui)
+            .id_salt("history-apps")
+            .striped(true)
+            .sense(egui::Sense::click())
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::remainder().at_least(220.0).clip(true))
+            .columns(Column::exact(100.0), 3)
+            .column(Column::exact(160.0))
+            .header(22.0, |mut h| {
+                for t in ["APPLICATION", "DOWNLOAD", "UPLOAD", "TOTAL", "SHARE"] {
+                    h.col(|ui| {
+                        ui.weak(RichText::new(t).small().strong());
+                    });
+                }
+            })
+            .body(|mut body| {
+                for a in view.apps.iter().take(50) {
+                    body.row(36.0, |mut row| {
+                        row.col(|ui| app_cell(ui, &a.name, &a.app.0, false, None));
+                        row.col(|ui| {
+                            ui.monospace(format_bytes(a.down));
+                        });
+                        row.col(|ui| {
+                            ui.monospace(format_bytes(a.up));
+                        });
+                        row.col(|ui| {
+                            ui.label(RichText::new(format_bytes(a.down + a.up)).monospace().strong());
+                        });
+                        row.col(|ui| {
+                            let share = (a.down + a.up) as f32 / grand as f32;
+                            ui.add(egui::ProgressBar::new(share).desired_width(140.0).fill(ACCENT));
+                        });
+                        if row.response().clicked() {
+                            pick = Some(a.app.clone());
+                        }
+                    });
+                }
+            });
+        if let Some(app) = pick {
+            self.history_app = Some(app);
+        }
+    }
+
+    /// Saves the current history view as CSV in the Downloads folder.
+    fn export_history(&self) {
+        let range = serde_json::to_value(self.history_range)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let mut path = format!("/api/history.csv?range={range}");
+        let mut name = format!("nattowok-history-{range}");
+        if let Some(app) = &self.history_app {
+            path += &format!("&app={}", crate::client::encode(&app.0));
+            name += &format!(
+                "-{}",
+                app.display_name().replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
+            );
+        }
+        let result = self.client.get_text(&path).and_then(|csv| {
+            let dir = downloads_dir();
+            let file = dir.join(format!("{name}.csv"));
+            std::fs::write(&file, csv).map_err(|e| format!("saving {}: {e}", file.display()))?;
+            Ok(file)
+        });
+        lock(&self.data).toast = Some(match result {
+            Ok(file) => (format!("Saved {}", file.display()), true, Instant::now()),
+            Err(e) => (e, false, Instant::now()),
+        });
+    }
+
     fn events_tab(&self, ui: &mut Ui) {
         let events = lock(&self.data).events.clone();
         if events.is_empty() {
@@ -1136,6 +1345,50 @@ impl NwlApp {
         if let Some(e) = &d.error {
             ui.colored_label(BAD, format!("{e}. Is nwld running? Retrying every second."));
         }
+    }
+}
+
+/// "1 minute", "5 minutes", "1 hour", "6 hours", "1 day".
+fn step_label(secs: i64) -> String {
+    match secs {
+        s if s % 86_400 == 0 => plural(s / 86_400, "day"),
+        s if s % 3600 == 0 => plural(s / 3600, "hour"),
+        s => plural(s / 60, "minute"),
+    }
+}
+
+fn plural(n: i64, unit: &str) -> String {
+    if n == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{n} {unit}s")
+    }
+}
+
+/// A local-time axis label suited to the point size.
+fn local_time_label(unix: i64, step: i64) -> String {
+    let Some(t) = chrono::DateTime::from_timestamp(unix, 0).map(|t| t.with_timezone(&chrono::Local)) else {
+        return String::new();
+    };
+    if step < 3600 {
+        t.format("%H:%M").to_string()
+    } else if step < 86_400 {
+        t.format("%a %H:%M").to_string()
+    } else {
+        t.format("%b %d").to_string()
+    }
+}
+
+/// The user's Downloads folder, or their home folder.
+fn downloads_dir() -> std::path::PathBuf {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| ".".into());
+    let downloads = home.join("Downloads");
+    if downloads.is_dir() {
+        downloads
+    } else {
+        home
     }
 }
 
@@ -1477,6 +1730,25 @@ impl NwlApp {
 
 impl eframe::App for NwlApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Started hidden at login. eframe shows the window after its first
+        // frame, so hide it again; then watch the tray for a few seconds and
+        // open the window if no tray host shows the icon (the app would be
+        // unreachable otherwise).
+        if let Some(at) = self.startup_check {
+            if self.hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            match self.tray.as_ref().map(|t| t.visible()) {
+                None | Some(false) => {
+                    self.startup_check = None;
+                    if self.hidden {
+                        self.show_window(ctx);
+                    }
+                }
+                Some(true) if at.elapsed() > Duration::from_secs(3) => self.startup_check = None,
+                Some(true) => ctx.request_repaint_after(Duration::from_millis(250)),
+            }
+        }
         self.drive_tray(ctx);
     }
 
@@ -1497,12 +1769,19 @@ impl eframe::App for NwlApp {
             ui.add_space(6.0);
             self.tabs(ui);
             ui.separator();
+            self.sync_history_query();
             match self.tab {
                 Tab::Apps => {
                     egui::ScrollArea::vertical().id_salt("apps-scroll").show(ui, |ui| self.apps_tab(ui)).inner
                 }
                 Tab::Connections => self.connections_tab(ui),
                 Tab::Rules => self.rules_tab(ui),
+                Tab::History => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("history-scroll")
+                        .show(ui, |ui| self.history_tab(ui))
+                        .inner
+                }
                 Tab::Usage => {
                     egui::ScrollArea::vertical()
                         .id_salt("usage-scroll")

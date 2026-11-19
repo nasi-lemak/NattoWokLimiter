@@ -5,6 +5,7 @@
 
 mod actions;
 mod app;
+mod autostart;
 mod client;
 mod data;
 mod notify;
@@ -12,17 +13,22 @@ mod tray;
 
 use std::sync::{Arc, Mutex};
 
-const USAGE: &str = "usage: nattowok [--server URL]
+const USAGE: &str = "usage: nattowok [--server URL] [--hidden]
+
+  --hidden   start in the tray (used when starting at login); the window
+             opens anyway if the desktop shows no tray icon
 
 Desktop app for NattoWokLimiter. Connects to the nwld daemon
 (default http://127.0.0.1:7657, or $NWL_SERVER).";
 
 fn main() -> eframe::Result {
     let mut server = std::env::var("NWL_SERVER").unwrap_or_else(|_| "http://127.0.0.1:7657".into());
+    let mut hidden = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--server" => server = args.next().unwrap_or_else(|| exit_usage()),
+            "--hidden" => hidden = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -41,6 +47,7 @@ fn main() -> eframe::Result {
             .with_app_id("nattowok")
             .with_inner_size([1180.0, 820.0])
             .with_min_inner_size([760.0, 520.0])
+            .with_visible(!hidden)
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!("../../../packaging/icons/nattowok-64.png"))
                     .expect("bundled icon is a valid PNG"),
@@ -64,7 +71,7 @@ fn main() -> eframe::Result {
             let shared = Arc::new(Mutex::new(data::Data::new()));
             let ctx = cc.egui_ctx.clone();
             let poller = data::spawn_poller(client.clone(), shared.clone(), move || ctx.request_repaint());
-            Ok(Box::new(app::NwlApp::new(&cc.egui_ctx, client, shared, poller)))
+            Ok(Box::new(app::NwlApp::new(&cc.egui_ctx, client, shared, poller, hidden)))
         }),
     )
 }

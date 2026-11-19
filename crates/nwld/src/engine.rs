@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 const RULES: &str = "rules.json";
 const QUOTAS: &str = "quotas.json";
 const USAGE: &str = "usage.json";
+const HISTORY: &str = "history.json";
 const KNOWN_APPS: &str = "known_apps.json";
 const MAX_EVENTS: usize = 500;
 
@@ -49,6 +50,8 @@ pub struct Engine {
     accountant: Accountant,
     quotas: QuotaTracker,
     usage: UsageDb,
+    /// Per-minute and per-hour traffic, machine-wide and per app.
+    history: nwl_core::history::TrafficHistory,
     known_apps: KnownApps,
     snapshot: Snapshot,
     /// Per-connection rate (up, down) in bytes/s over the last tick.
@@ -117,6 +120,7 @@ impl Engine {
             accountant: Accountant::new(history_len, 5 * 60 * 1000),
             quotas: store.load(QUOTAS)?.unwrap_or_default(),
             usage: store.load(USAGE)?.unwrap_or_default(),
+            history: store.load(HISTORY)?.unwrap_or_default(),
             known_apps: store.load(KNOWN_APPS)?.unwrap_or_default(),
             store,
             snapshot: Snapshot::default(),
@@ -178,7 +182,11 @@ impl Engine {
         self.refresh_effective();
         let day = self.key_for(Period::Day);
         let elapsed_ms = snap.mono_ms.saturating_sub(self.snapshot.mono_ms).max(1);
+        let system_before = (self.accountant.system().total_up, self.accountant.system().total_down);
         let deltas = self.accountant.ingest(&snap);
+        let system = self.accountant.system();
+        let system_delta = [system.total_up - system_before.0, system.total_down - system_before.1];
+        let mut app_deltas: HashMap<AppId, [u64; 2]> = HashMap::new();
 
         let conns: HashMap<&ConnKey, &Connection> = snap.connections.iter().map(|c| (&c.key, c)).collect();
         self.conn_rates.clear();
@@ -189,6 +197,9 @@ impl Engine {
             }
             if let Some(app) = &d.app {
                 self.usage.record(&day, app, d.up, d.down);
+                let entry = app_deltas.entry(app.clone()).or_default();
+                entry[0] += d.up;
+                entry[1] += d.down;
                 if let Some(remote) = d.key.remote {
                     self.remotes.record(app, remote, d.key.protocol, d.up, d.down, snap.mono_ms);
                 }
@@ -209,6 +220,8 @@ impl Engine {
                 }
             }
         }
+
+        self.history.record(now.timestamp(), system_delta, app_deltas.iter().map(|(app, b)| (app, *b)));
 
         let mut new_apps = Vec::new();
         for process in snap.processes.values() {
@@ -311,6 +324,7 @@ impl Engine {
         }
         self.store.save(QUOTAS, &self.quotas)?;
         self.store.save(USAGE, &self.usage)?;
+        self.store.save(HISTORY, &self.history)?;
         self.store.save(KNOWN_APPS, &self.known_apps)?;
         self.dirty = false;
         Ok(())
@@ -511,6 +525,45 @@ impl Engine {
 
     pub fn events_since(&self, after: u64) -> Vec<Event> {
         self.events.iter().filter(|e| e.id > after).cloned().collect()
+    }
+
+    /// Traffic over `range`, machine-wide or for one app (full path).
+    pub fn history(&self, range: nwl_core::history::Range, app: Option<&str>) -> nwl_core::api::HistoryView {
+        let now = chrono::Utc::now().timestamp();
+        let app = app.map(|a| AppId(a.to_string()));
+        nwl_core::api::HistoryView {
+            range,
+            step_secs: range.geometry().1,
+            points: self.history.series(range, app.as_ref(), now),
+            apps: self
+                .history
+                .top_apps(range, now)
+                .into_iter()
+                .map(|(app, [up, down])| UsageEntry { name: app.display_name().to_string(), app, up, down })
+                .collect(),
+        }
+    }
+
+    /// The history of `range` as CSV (see [`nwl_core::history::to_csv`]).
+    pub fn history_csv(&self, range: nwl_core::history::Range, app: Option<&str>) -> String {
+        let points = self.history.aggregate(range, chrono::Utc::now().timestamp());
+        nwl_core::history::to_csv(&points, app.map(|a| AppId(a.to_string())).as_ref())
+    }
+
+    /// Daily usage per app as CSV: `day,app,upload_bytes,download_bytes`.
+    pub fn usage_csv(&self, days: usize) -> String {
+        let mut out = String::from("day,app,upload_bytes,download_bytes\n");
+        for d in self.usage(days) {
+            for a in d.apps {
+                let app = if a.app.0.contains([',', '"', '\n']) {
+                    format!("\"{}\"", a.app.0.replace('"', "\"\""))
+                } else {
+                    a.app.0.clone()
+                };
+                out += &format!("{},{app},{},{}\n", d.day, a.up, a.down);
+            }
+        }
+        out
     }
 
     pub fn usage(&self, days: usize) -> Vec<UsageDay> {
@@ -814,6 +867,26 @@ mod tests {
             .filter(|ev| matches!(ev.kind, EventKind::Paused | EventKind::Resumed))
             .count();
         assert_eq!(toggles, 2);
+    }
+
+    #[test]
+    fn history_and_csv_exports() {
+        let mut e = Engine::new(temp_store("history"), 10).unwrap();
+        let now = Local::now();
+        e.ingest(snap(0, 0, 0), now);
+        e.ingest(snap(1000, 300, 4000), now);
+        let h = e.history(nwl_core::history::Range::Hour, Some("/opt/steam/steam"));
+        assert_eq!((h.points.len(), h.step_secs), (60, 60));
+        assert_eq!(
+            h.points.iter().map(|p| (p.up, p.down)).fold((0, 0), |a, p| (a.0 + p.0, a.1 + p.1)),
+            (300, 4000)
+        );
+        assert_eq!(h.apps[0].name, "steam");
+        let csv = e.history_csv(nwl_core::history::Range::Hour, None);
+        assert!(csv.lines().any(|l| l.ends_with(",/opt/steam/steam,300,4000")), "{csv}");
+        let usage = e.usage_csv(7);
+        assert!(usage.starts_with("day,app,upload_bytes,download_bytes\n"));
+        assert!(usage.contains(",/opt/steam/steam,300,4000\n"), "{usage}");
     }
 
     #[test]

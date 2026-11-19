@@ -28,7 +28,8 @@ There are three front ends over the same daemon:
 
 * **`nattowok`**, the native desktop app (Rust, egui): live traffic graph, per-app sparklines,
   one-click block and limit, a connection inspector with host names and RTT, a rules editor with
-  schedules, data usage history and an event log.
+  schedules, traffic history graphs from the last hour to the last 90 days with CSV export, data
+  usage per day and an event log. It can start with your login, in the tray.
 * **The web dashboard**, served by the daemon at <http://127.0.0.1:7657>, with the same views and no
   install.
 * **`nwl`**, the CLI, for scripts and terminals.
@@ -47,6 +48,7 @@ There are three front ends over the same daemon:
 | Host names of remote addresses (reverse DNS, cached, in the background) | ✅ | ✅ |
 | "Who is this app talking to?": remote hosts per app with bytes, ports, protocols | ✅ | ✅ |
 | Usage history per app per day (400 days) | ✅ | ✅ |
+| Traffic history graphs, whole machine or one app: last hour to last 90 days, CSV export | ✅ | ✅ |
 | "New app used the network" events | ✅ | ✅ |
 | Traffic spike detection ("Dropbox is uploading at 8 MB/s, usually 12 kB/s") | ✅ | ✅ |
 | Desktop notifications for new apps, spikes, quotas and enforcement problems, each switchable | ✅ | ✅ |
@@ -54,6 +56,7 @@ There are three front ends over the same daemon:
 | Tray quick actions: block, unblock and limit the busiest apps from the menu | ✅ | ✅ |
 | Buttons on notifications: "Block" a new app, "Block" or "Limit to 1 MB/s" on a spike | ✅ | ❌ (plain notifications) |
 | Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
+| Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
 
 Rules are evaluated predictably (see [rules](#rules)), and when a backend can't express a rule exactly
@@ -121,6 +124,8 @@ nwl add '<rule json>'            any rule, see below
 nwl rm ID | enable ID | disable ID
 nwl pause | resume               stop / restart all blocking and limiting
 nwl usage [--days N]             data used per app
+nwl history [--range R] [--app PATH] [--csv]
+                                 traffic over hour|day|week|month|quarter, as a chart or CSV
 nwl remotes [--app PATH] [-n N]  remote hosts by traffic, per app or overall
 nwl events
 ```
@@ -231,6 +236,9 @@ pages).
 | POST | `/api/pause` | `{"paused": true}` pauses all rules, `false` resumes |
 | GET | `/api/quotas` | quota usage in the current period |
 | GET | `/api/usage?days=N` | per-app bytes per day |
+| GET | `/api/usage.csv?days=N` | the same as a CSV download |
+| GET | `/api/history?range=R&app=PATH` | traffic per point over `hour`, `day`, `week`, `month` or `quarter`, plus top apps |
+| GET | `/api/history.csv?range=R&app=PATH` | the same as a CSV download (one row per point and app) |
 | GET | `/api/remotes?app=PATH&limit=N` | remote hosts by traffic this session, for one app or all |
 | GET | `/api/events?after=ID` | event log |
 | GET | `/api/stream` | Server-Sent Events, one `overview` per tick |

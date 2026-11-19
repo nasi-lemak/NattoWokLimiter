@@ -74,9 +74,9 @@ nav.tabs .count { font-weight: 500; color: var(--muted); margin-left: 4px; font-
 input, select { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
   border-radius: 8px; padding: 6px 9px; min-width: 0; }
 input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-button.btn { font: inherit; font-size: 13px; font-weight: 600; border-radius: 8px; padding: 5px 11px; cursor: pointer;
+button.btn, a.btn { text-decoration: none; display: inline-block; font: inherit; font-size: 13px; font-weight: 600; border-radius: 8px; padding: 5px 11px; cursor: pointer;
   border: 1px solid var(--border); background: var(--panel-2); color: var(--text); white-space: nowrap; }
-button.btn:hover { border-color: var(--muted); }
+button.btn:hover, a.btn:hover { border-color: var(--muted); }
 button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.btn.danger { color: var(--bad); }
 button.btn.on { background: var(--bad-weak); color: var(--bad); border-color: transparent; }
@@ -187,6 +187,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 1
     <button role="tab" data-tab="apps" aria-selected="true">Applications<span class="count" id="count-apps"></span></button>
     <button role="tab" data-tab="conns" aria-selected="false">Connections<span class="count" id="count-conns"></span></button>
     <button role="tab" data-tab="rules" aria-selected="false">Rules<span class="count" id="count-rules"></span></button>
+    <button role="tab" data-tab="history" aria-selected="false">History</button>
     <button role="tab" data-tab="usage" aria-selected="false">Usage</button>
     <button role="tab" data-tab="events" aria-selected="false">Events<span class="count" id="count-events"></span></button>
   </nav>
@@ -246,9 +247,27 @@ footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 1
     <div id="rules-empty" class="empty hidden">No rules yet. Block or limit an application from the Applications tab, or create a rule.</div>
   </section>
 
+  <section id="tab-history" class="card hidden">
+    <div class="toolbar">
+      <select id="history-range" aria-label="Range">
+        <option value="hour">Last hour</option><option value="day" selected>Last 24 hours</option>
+        <option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option></select>
+      <select id="history-app" aria-label="Application"><option value="">All traffic</option></select>
+      <span class="grow" id="history-total" style="font-size:13px;color:var(--muted)"></span>
+      <a class="btn" id="history-csv" download>Export CSV</a>
+    </div>
+    <canvas id="history-chart" class="usage-chart" aria-label="Traffic history chart"></canvas>
+    <div class="table-wrap" id="history-apps-wrap"><table>
+      <thead><tr><th>Application</th><th class="num">Download</th><th class="num">Upload</th><th class="num">Total</th><th class="hide-sm">Share</th></tr></thead>
+      <tbody id="history-body"></tbody>
+    </table></div>
+    <div id="history-empty" class="empty hidden">No traffic recorded in this range yet.</div>
+  </section>
+
   <section id="tab-usage" class="card hidden">
     <div class="toolbar"><span class="grow" style="font-weight:600">Data usage</span>
-      <select id="usage-days" aria-label="Range"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option></select></div>
+      <select id="usage-days" aria-label="Range"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option></select>
+      <a class="btn" id="usage-csv" download>Export CSV</a></div>
     <canvas id="usage-chart" class="usage-chart" aria-label="Daily usage chart"></canvas>
     <div class="table-wrap"><table>
       <thead><tr><th>Application</th><th class="num">Download</th><th class="num">Upload</th><th class="num">Total</th><th class="hide-sm">Share</th></tr></thead>
@@ -722,6 +741,73 @@ function drawUsage() {
   ctx.textAlign = "right"; ctx.fillText(days[n - 1].day, w, h - 4);
 }
 $("#usage-days").addEventListener("change", loadUsage);
+$("#usage-csv").onclick = () => { $("#usage-csv").href = "/api/usage.csv?days=" + $("#usage-days").value; };
+
+// ---- history tab ----
+function historyQuery() {
+  const app = $("#history-app").value;
+  return "range=" + $("#history-range").value + (app ? "&app=" + encodeURIComponent(app) : "");
+}
+async function loadHistory() {
+  if (state.tab !== "history") return;
+  try { state.history = await api("/api/history?" + historyQuery()); } catch { return; }
+  $("#history-csv").href = "/api/history.csv?" + historyQuery();
+  const h = state.history, sel = $("#history-app"), current = sel.value;
+  // Offer every app seen in this range, keeping the current choice.
+  const names = new Map((state.overview?.apps || []).map(a => [a.app, a.name]));
+  for (const a of h.apps) names.set(a.app, a.name);
+  const opts = `<option value="">All traffic</option>` + [...names].sort((a, b) => a[1].localeCompare(b[1]))
+    .map(([app, name]) => `<option value="${esc(app)}">${esc(name)}</option>`).join("");
+  if (sel.innerHTML !== opts) { sel.innerHTML = opts; sel.value = current; }
+  const up = h.points.reduce((s, p) => s + p.up, 0), down = h.points.reduce((s, p) => s + p.down, 0);
+  $("#history-total").innerHTML = `<span class="down">↓ ${fmtBytes(down)}</span> &nbsp; <span class="up">↑ ${fmtBytes(up)}</span> &nbsp; · one point per ${stepLabel(h.step_secs)}`;
+  const filtered = !!current, grand = h.apps.reduce((s, a) => s + a.up + a.down, 0) || 1;
+  $("#history-apps-wrap").classList.toggle("hidden", filtered);
+  $("#history-body").innerHTML = filtered ? "" : h.apps.slice(0, 50).map(a => `<tr class="app-row" data-app="${esc(a.app)}">
+    <td><div class="app-cell"><div class="avatar" style="background:${colorFor(a.app)}">${esc((a.name[0] || "?").toUpperCase())}</div>
+      <div style="min-width:0"><div class="app-name">${esc(a.name)}</div><div class="app-path">${esc(a.app)}</div></div></div></td>
+    <td class="num">${fmtBytes(a.down)}</td><td class="num">${fmtBytes(a.up)}</td><td class="num"><b>${fmtBytes(a.up + a.down)}</b></td>
+    <td class="hide-sm"><div class="progress"><div style="width:${(100 * (a.up + a.down) / grand).toFixed(1)}%"></div></div></td></tr>`).join("");
+  $("#history-empty").classList.toggle("hidden", up + down > 0);
+  drawHistory();
+}
+function stepLabel(secs) {
+  const n = (v, u) => v === 1 ? `1 ${u}` : `${v} ${u}s`;
+  return secs % 86400 === 0 ? n(secs / 86400, "day") : secs % 3600 === 0 ? n(secs / 3600, "hour") : n(secs / 60, "minute");
+}
+function drawHistory() {
+  if (state.tab !== "history" || !state.history) return;
+  const [ctx, w, h] = setupCanvas($("#history-chart"));
+  const pts = state.history.points, step = state.history.step_secs;
+  const max = niceMax(Math.max(1, ...pts.map(p => Math.max(p.up, p.down))));
+  const left = 64, bottom = h - 20, top = 8, n = pts.length;
+  const x = i => left + (w - left - 4) * i / Math.max(1, n - 1), y = v => bottom - (bottom - top) * v / max;
+  ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = css("--muted"); ctx.strokeStyle = css("--border"); ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4, yy = Math.round(y(v)) + .5;
+    ctx.beginPath(); ctx.moveTo(left, yy); ctx.lineTo(w, yy); ctx.stroke();
+    ctx.textAlign = "right"; ctx.fillText(i ? fmtBytes(v) : "0", left - 8, yy + 4);
+  }
+  const label = t => {
+    const d = new Date(t * 1000);
+    return step < 3600 ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : step < 86400 ? d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })
+      : d.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
+  [0, Math.floor(n / 2), n - 1].forEach((i, k) => {
+    if (!pts[i]) return;
+    ctx.textAlign = ["left", "center", "right"][k]; ctx.fillText(label(pts[i].t), x(i), h - 4);
+  });
+  series(ctx, pts.map(p => p.down), x, y, css("--down"), true);
+  series(ctx, pts.map(p => p.up), x, y, css("--up"), true);
+}
+$("#history-range").addEventListener("change", loadHistory);
+$("#history-app").addEventListener("change", loadHistory);
+$("#history-body").addEventListener("click", ev => {
+  const tr = ev.target.closest("tr.app-row"); if (!tr) return;
+  $("#history-app").value = tr.dataset.app; loadHistory();
+});
+setInterval(loadHistory, 10000);
 
 // ---- events tab ----
 const events = [];
@@ -758,6 +844,7 @@ document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("main > section[id^=tab-]").forEach(s => s.classList.toggle("hidden", s.id !== "tab-" + state.tab));
   if (state.tab === "conns") renderConns();
   if (state.tab === "usage") loadUsage();
+  if (state.tab === "history") loadHistory();
   if (state.tab === "rules") renderRules();
   if (state.tab === "apps") renderApps();
 });
@@ -797,7 +884,7 @@ async function start() {
   es.addEventListener("overview", ev => onOverview(JSON.parse(ev.data)));
   es.onerror = () => { const m = $("#mode"); m.className = "badge bad"; m.innerHTML = `<span class="dot"></span>Disconnected`; };
 }
-addEventListener("resize", () => { drawGraph(); drawUsage(); renderApps(); });
+addEventListener("resize", () => { drawGraph(); drawUsage(); drawHistory(); renderApps(); });
 start();
 </script>
 </body>
