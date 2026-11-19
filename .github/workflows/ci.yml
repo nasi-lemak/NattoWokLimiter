@@ -20,9 +20,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      # The web dashboard: the desktop app built for the browser.
+      - run: cargo clippy -p nwl-gui --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo clippy -p xtask -- -D warnings
+      - run: cargo xtask web
+      # With the dashboard built, the nwld tests also check it is served.
       - run: cargo test
       # Kernel tests (eBPF counters, sock_diag, nftables + cgroup enforcement)
       # need root: build as the runner user, run only the test binaries as
@@ -44,12 +50,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - name: Release binaries
         run: |
-          cargo build --release --workspace
+          cargo xtask web
+          cargo build --release
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/nwld.exe, target/release/nwl.exe, target/release/nattowok.exe, README.md dist/
           Compress-Archive -Path dist/* -DestinationPath nattowok-windows-x86_64.zip -Force
@@ -74,9 +82,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo install --locked cargo-deb cargo-generate-rpm
-      - run: cargo build --release --workspace
+      - run: cargo xtask web
+      - run: cargo build --release
       - run: cargo deb -p nwld --no-build
       - run: cargo generate-rpm -p crates/nwld
       - name: Install the .deb, check the service starts, remove it
@@ -86,6 +97,9 @@ jobs:
           sleep 3
           systemctl is-active nwld
           nwl status
+          # The packaged nwld serves the web dashboard.
+          curl -sf http://127.0.0.1:7657/ | grep -q '<canvas id="nattowok">'
+          curl -sf -o /dev/null -w '%{content_type}\n' http://127.0.0.1:7657/nattowok_bg.wasm | grep -q application/wasm
           sudo apt-get remove -y nattowok
           ! systemctl is-active nwld
       # Downloads for testing; kept a week. Uploading is a convenience, so a

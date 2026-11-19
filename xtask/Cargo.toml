@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+description = "Build tasks for NattoWokLimiter: `cargo xtask web` builds the web dashboard."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Must be the exact version of the wasm-bindgen crate the app links (see
+# Cargo.lock); being in the workspace keeps them in step.
+wasm-bindgen-cli-support = "=0.2.129"
+flate2 = "1"

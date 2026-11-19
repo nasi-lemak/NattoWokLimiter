@@ -1,8 +1,11 @@
-//! Blocking client for the daemon API.
+//! Client for the daemon API.
+//!
+//! The same async interface on both targets: on the desktop the requests are
+//! blocking (`ureq`, run on the poller thread); in the browser they use
+//! `fetch`.
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::time::Duration;
 
 /// Percent-encodes a query parameter value.
 pub fn encode(s: &str) -> String {
@@ -14,50 +17,110 @@ pub fn encode(s: &str) -> String {
         .collect()
 }
 
+/// The error message of a failed response: the daemon's own, when it has one.
+fn status_error(code: u16, body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(String::from))
+        .unwrap_or_else(|| format!("daemon returned {code}"))
+}
+
 #[derive(Clone)]
 pub struct Client {
     base: String,
+    #[cfg(not(target_arch = "wasm32"))]
     agent: ureq::Agent,
 }
 
 impl Client {
-    pub fn new(base: &str) -> Self {
-        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).build();
-        Self { base: base.trim_end_matches('/').to_string(), agent }
-    }
-
     pub fn base(&self) -> &str {
         &self.base
     }
 
-    pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        let value = self.call("GET", path, None)?;
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        let value = self.call("GET", path, None).await?;
         serde_json::from_value(value).map_err(|e| format!("unexpected response from {path}: {e}"))
     }
 
     /// Sends a request; errors carry the daemon's message when it has one.
-    /// A non-JSON response body (CSV).
-    pub fn get_text(&self, path: &str) -> Result<String, String> {
-        match self.agent.get(&format!("{}{path}", self.base)).call() {
-            Ok(r) => r.into_string().map_err(|e| e.to_string()),
-            Err(ureq::Error::Status(code, _)) => Err(format!("daemon returned {code}")),
-            Err(e) => Err(format!("cannot reach nwld at {}: {e}", self.base)),
-        }
+    pub async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+        let text = self.request(method, path, body).await?;
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Client {
+    pub fn new(base: &str) -> Self {
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(5)).build();
+        Self { base: base.trim_end_matches('/').to_string(), agent }
     }
 
-    pub fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+    /// A response body as text (blocking; for CSV downloads).
+    pub fn get_text(&self, path: &str) -> Result<String, String> {
+        pollster::block_on(self.request("GET", path, None))
+    }
+
+    async fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, String> {
         let req = self.agent.request(method, &format!("{}{path}", self.base)).set("x-nwl-client", "desktop");
         let resp = match body {
             Some(b) => req.send_json(b),
             None => req.call(),
         };
         match resp {
-            Ok(r) => Ok(r.into_json().unwrap_or(Value::Null)),
+            Ok(r) => r.into_string().map_err(|e| e.to_string()),
             Err(ureq::Error::Status(code, r)) => {
-                let body: Value = r.into_json().unwrap_or(Value::Null);
-                Err(body["error"].as_str().map_or_else(|| format!("daemon returned {code}"), String::from))
+                Err(status_error(code, &r.into_string().unwrap_or_default()))
             }
             Err(e) => Err(format!("cannot reach nwld at {}: {e}", self.base)),
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Client {
+    /// A client for the daemon that served this page.
+    pub fn same_origin() -> Self {
+        let base = web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default();
+        Self { base }
+    }
+
+    async fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, String> {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen_futures::JsFuture;
+        let unreachable = |e: wasm_bindgen::JsValue| format!("cannot reach nwld at {}: {e:?}", self.base);
+
+        let headers = web_sys::Headers::new().map_err(unreachable)?;
+        headers.set("x-nwl-client", "web").map_err(unreachable)?;
+        let init = web_sys::RequestInit::new();
+        init.set_method(method);
+        if let Some(b) = body {
+            headers.set("content-type", "application/json").map_err(unreachable)?;
+            init.set_body(&wasm_bindgen::JsValue::from_str(&b.to_string()));
+        }
+        init.set_headers(&headers);
+        let url = format!("{}{path}", self.base);
+        let request = web_sys::Request::new_with_str_and_init(&url, &init).map_err(unreachable)?;
+        let window = web_sys::window().ok_or("no window")?;
+        let resp: web_sys::Response =
+            JsFuture::from(window.fetch_with_request(&request)).await.map_err(unreachable)?.unchecked_into();
+        let text = JsFuture::from(resp.text().map_err(unreachable)?).await.map_err(unreachable)?;
+        let text = text.as_string().unwrap_or_default();
+        if resp.ok() {
+            Ok(text)
+        } else {
+            Err(status_error(resp.status(), &text))
+        }
+    }
+}
+
+/// Waits without blocking the browser.
+#[cfg(target_arch = "wasm32")]
+pub async fn sleep(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }

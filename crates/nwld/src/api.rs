@@ -1,4 +1,5 @@
-//! HTTP API and the embedded web dashboard.
+//! HTTP API and the embedded web dashboard (the desktop app compiled to
+//! WebAssembly; see `build.rs`).
 //!
 //! The API controls a firewall, so it only listens on loopback and defends
 //! against browsers being used against it:
@@ -25,7 +26,10 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
-const INDEX: &str = include_str!("../assets/index.html");
+/// The web dashboard's files, gzip-compressed (from `build.rs`).
+mod web {
+    include!(concat!(env!("OUT_DIR"), "/web.rs"));
+}
 pub const CLIENT_HEADER: &str = "x-nwl-client";
 
 /// Messages from the API to the engine thread.
@@ -49,7 +53,10 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(|| async { Html(INDEX) }))
+        .route("/", get(index))
+        .route("/nattowok.js", get(|| async { gzipped("text/javascript", web::JS) }))
+        .route("/nattowok_bg.wasm", get(|| async { gzipped("application/wasm", web::WASM) }))
+        .route("/favicon.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], FAVICON) }))
         .route("/api/status", get(status))
         .route("/api/overview", get(overview))
         .route("/api/apps", get(apps))
@@ -90,6 +97,71 @@ async fn guard(req: Request, next: Next) -> Response {
         return error(StatusCode::FORBIDDEN, "missing X-NWL-Client header");
     }
     next.run(req).await
+}
+
+const FAVICON: &[u8] = include_bytes!("../../../packaging/icons/nattowok-64.png");
+
+/// The page that runs the dashboard: a canvas and the module that starts the
+/// app in it.
+const INDEX: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NattoWok Limiter</title>
+<link rel="icon" href="/favicon.png">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1b; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #status { position: absolute; inset: 0; display: grid; place-items: center;
+            color: #aaa; font: 15px system-ui, sans-serif; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="nattowok"></canvas>
+<div id="status">Loading NattoWok Limiter…</div>
+<script type="module">
+  import init from "/nattowok.js";
+  init({ module_or_path: "/nattowok_bg.wasm" }).then(() => document.getElementById("status").remove())
+        .catch(e => { document.getElementById("status").textContent = "The dashboard failed to load: " + e; });
+</script>
+</body>
+</html>
+"#;
+
+/// Shown when nwld was built without the dashboard.
+const NOT_BUILT: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>NattoWok Limiter</title>
+<link rel="icon" href="/favicon.png"></head>
+<body style="font: 15px system-ui, sans-serif; max-width: 40em; margin: 3em auto; line-height: 1.5">
+<h1>NattoWok Limiter</h1>
+<p>nwld is running, but this build does not include the web dashboard. Use the desktop app
+(<code>nattowok</code>) or the CLI (<code>nwl</code>), or rebuild nwld with the dashboard:</p>
+<pre>rustup target add wasm32-unknown-unknown
+cargo xtask web
+cargo build --release</pre>
+</body></html>
+"#;
+
+async fn index() -> Html<&'static str> {
+    Html(if web::BUILT { INDEX } else { NOT_BUILT })
+}
+
+/// A file stored gzip-compressed; every browser accepts that encoding.
+fn gzipped(content_type: &'static str, body: &'static [u8]) -> Response {
+    if body.is_empty() {
+        return error(StatusCode::NOT_FOUND, "the web dashboard is not built into this nwld");
+    }
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_ENCODING, "gzip"),
+            // Revalidate: a new nwld may bring a new dashboard.
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 fn error(code: StatusCode, message: &str) -> Response {
@@ -439,9 +511,31 @@ mod tests {
     async fn serves_dashboard() {
         let (app, _) = app();
         let resp = app
+            .clone()
             .oneshot(Request::builder().uri("/").header("host", "localhost").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        let page = resp.into_body().collect().await.unwrap().to_bytes();
+        let page = String::from_utf8_lossy(&page);
+        let wasm = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nattowok_bg.wasm")
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if super::web::BUILT {
+            assert!(page.contains(r#"<canvas id="nattowok">"#));
+            assert_eq!(wasm.status(), StatusCode::OK);
+            assert_eq!(wasm.headers()[header::CONTENT_ENCODING], "gzip");
+            assert_eq!(wasm.headers()[header::CONTENT_TYPE], "application/wasm");
+        } else {
+            assert!(page.contains("cargo xtask web"));
+            assert_eq!(wasm.status(), StatusCode::NOT_FOUND);
+        }
     }
 }

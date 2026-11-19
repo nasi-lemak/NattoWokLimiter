@@ -48,6 +48,8 @@ trade-offs stay visible.
 
 - **Notification buttons on Windows and macOS.** Tray quick actions and notification buttons are done
   on Linux; Windows toasts and macOS notifications show without buttons for now.
+- **Web dashboard extras.** The dashboard is the desktop app compiled to WebAssembly. Next: browser
+  notifications, and a smaller download.
 - **Remote management** with authentication (token or mTLS), and several machines in one dashboard.
 - **Packages.** deb and rpm are done (built by CI, attached to releases). Next: AUR, an MSI with a
   service installer, Homebrew.

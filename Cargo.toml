@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/nwl-core", "crates/nwl-platform", "crates/nwld", "crates/nwl", "crates/nwl-gui"]
+members = ["crates/nwl-core", "crates/nwl-platform", "crates/nwld", "crates/nwl", "crates/nwl-gui", "xtask"]
+# `cargo build`, `test` and `clippy` skip the build tooling unless asked.
+default-members = ["crates/nwl-core", "crates/nwl-platform", "crates/nwld", "crates/nwl", "crates/nwl-gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,3 +35,10 @@ ureq = { version = "2", default-features = false, features = ["json"] }
 [profile.release]
 # Smaller binaries for packages; panics still print a message.
 strip = true
+
+# The web dashboard (WebAssembly): small and fast, as browsers download it.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1

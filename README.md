@@ -30,8 +30,9 @@ There are three front ends over the same daemon:
   one-click block and limit, a connection inspector with host names and RTT, a rules editor with
   schedules, traffic history graphs from the last hour to the last 90 days with CSV export, data
   usage per day and an event log. It can start with your login, in the tray.
-* **The web dashboard**, served by the daemon at <http://127.0.0.1:7657>, with the same views and no
-  install.
+* **The web dashboard**, served by the daemon at <http://127.0.0.1:7657>: the same app compiled to
+  WebAssembly, so it has the same views, with nothing to install. (No tray, notifications or
+  start-at-login there; those are the desktop app's.)
 * **`nwl`**, the CLI, for scripts and terminals.
 
 ## What it does today
@@ -73,6 +74,10 @@ Requirements: Rust 1.80+. On Linux, enforcement needs root, `nft` (nftables) and
 current distribution has. Monitoring works without them.
 
 ```sh
+# Optional: the web dashboard (the desktop app built for the browser, embedded in nwld)
+rustup target add wasm32-unknown-unknown
+cargo xtask web
+
 cargo build --release
 
 # Try it without touching your system: simulated apps that obey your rules.
@@ -96,7 +101,8 @@ on install), the application-menu entry and icons. CI builds them on every push 
 
 ```sh
 cargo install cargo-deb cargo-generate-rpm
-cargo build --release --workspace
+rustup target add wasm32-unknown-unknown && cargo xtask web   # the web dashboard
+cargo build --release
 cargo deb -p nwld --no-build            # target/debian/nattowok_*.deb
 cargo generate-rpm -p crates/nwld       # target/generate-rpm/nattowok-*.rpm
 
@@ -212,9 +218,13 @@ never reaches your ISP, and throttling it breaks local apps.
     developing the UI.
 * **`nwld`**: the daemon. It runs the sampling loop, persists state, resolves host names in the
   background, and serves the API and dashboard. When it stops, it removes everything it installed.
-* **`nwl-gui`** (binary `nattowok`): the desktop app. It polls the API on a background thread, so the
-  UI never waits on the network, and table rows hold still while the pointer is over them so buttons
-  don't move under the cursor.
+* **`nwl-gui`** (binary `nattowok`): the desktop app, and compiled to WebAssembly, the web dashboard.
+  It polls the API in the background (a thread on the desktop, a task on the page's event loop in
+  the browser), so the UI never waits on the network, and table rows hold still while the pointer is
+  over them so buttons don't move under the cursor.
+* **`xtask`**: `cargo xtask web` builds the web dashboard (wasm-bindgen runs as a library, so no
+  other tools are needed) into `crates/nwld/web/`, which the nwld build embeds. Without it, nwld's
+  page explains how to add it.
 * **`nwl`**: the CLI.
 
 The API listens on loopback only. It rejects requests whose `Host` isn't a loopback name (to stop DNS

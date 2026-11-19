@@ -1,14 +1,17 @@
-//! Background polling of the daemon, so the UI thread never blocks on the
-//! network. The UI reads [`Data`] and sends [`Request`]s.
+//! Background polling of the daemon, so the UI never waits on the network.
+//! The UI reads [`Data`] and sends [`Request`]s. On the desktop the poller is
+//! a thread; in the browser it is a task on the page's event loop.
 
 use crate::client::Client;
 use nwl_core::api::{AppView, ConnView, Event, HistoryView, Overview, RemoteView, Status, UsageDay};
 use nwl_core::history::Range;
 use nwl_core::model::AppId;
 use nwl_core::rules::Rule;
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 pub const HISTORY: usize = 120;
 pub const SPARK: usize = 60;
@@ -43,6 +46,8 @@ pub struct Data {
     pub history_query: Option<(Range, Option<AppId>)>,
     /// Result of the last action, shown as a toast.
     pub toast: Option<(String, bool, Instant)>,
+    /// Outcome of the last rule-form submission, for the form to pick up.
+    pub rule_form_result: Option<Result<(), String>>,
     last_mono: u64,
     last_event: u64,
     primed: bool,
@@ -72,13 +77,34 @@ impl Data {
 
 /// What the UI wants refreshed besides the overview.
 pub enum Request {
-    /// Poll now instead of waiting for the next second.
-    Refresh,
     Usage(usize),
     /// Track the remote hosts of this app (or stop).
     Remotes(Option<AppId>),
     /// Fetch (and keep refreshing) this history view, or stop.
     History(Option<(Range, Option<AppId>)>),
+    /// Run an API call, then refresh.
+    Call(Call),
+}
+
+/// An API call made for the user, with what to say when it worked.
+pub struct Call {
+    pub method: &'static str,
+    pub path: String,
+    pub body: Option<Value>,
+    pub done: String,
+    /// The rule form waits for this call's outcome (errors show in the form).
+    pub rule_form: bool,
+}
+
+impl Call {
+    pub fn new(
+        method: &'static str,
+        path: impl Into<String>,
+        body: Option<Value>,
+        done: impl Into<String>,
+    ) -> Self {
+        Self { method, path: path.into(), body, done: done.into(), rule_form: false }
+    }
 }
 
 pub type Shared = Arc<Mutex<Data>>;
@@ -89,6 +115,7 @@ pub fn lock(data: &Shared) -> std::sync::MutexGuard<'_, Data> {
 
 /// Carries out a notification button: the app's rules as they are now
 /// decide the request, so a second click never stacks a duplicate rule.
+#[cfg(not(target_arch = "wasm32"))]
 fn run_action(client: &Client, data: &Shared, app: AppId, name: String, action: crate::actions::QuickAction) {
     let target = lock(data)
         .apps()
@@ -97,13 +124,57 @@ fn run_action(client: &Client, data: &Shared, app: AppId, name: String, action: 
         .map(crate::actions::Target::from)
         .unwrap_or(crate::actions::Target { app, name, block_rule: None, limit_rule: None });
     let Some(r) = crate::actions::request(&target, &action) else { return };
-    let toast = match client.call(r.method, &r.path, r.body) {
-        Ok(_) => (r.done, true, Instant::now()),
-        Err(e) => (e, false, Instant::now()),
-    };
-    lock(data).toast = Some(toast);
+    pollster::block_on(run_call(client, data, Call::new(r.method, r.path, r.body, r.done)));
 }
 
+async fn run_call(client: &Client, data: &Shared, call: Call) {
+    let result = client.call(call.method, &call.path, call.body).await;
+    let mut d = lock(data);
+    match &result {
+        Ok(_) => d.toast = Some((call.done, true, Instant::now())),
+        Err(e) if !call.rule_form => d.toast = Some((e.clone(), false, Instant::now())),
+        Err(_) => {}
+    }
+    if call.rule_form {
+        d.rule_form_result = Some(result.map(|_| ()));
+    }
+}
+
+/// Applies a request; whether to poll right away is up to the caller.
+async fn handle(client: &Client, data: &Shared, request: Request, timers: &mut Timers) {
+    match request {
+        Request::Usage(days) => {
+            lock(data).usage_days = days;
+            timers.usage_due = Instant::now();
+        }
+        Request::Remotes(app) => {
+            let mut d = lock(data);
+            d.remotes.clear();
+            d.remotes_app = app;
+        }
+        Request::History(query) => {
+            let mut d = lock(data);
+            d.history = None;
+            d.history_query = query;
+            timers.history_due = Instant::now();
+        }
+        Request::Call(call) => run_call(client, data, call).await,
+    }
+}
+
+/// When the slower views are next refreshed.
+struct Timers {
+    usage_due: Instant,
+    history_due: Instant,
+}
+
+impl Timers {
+    fn new() -> Self {
+        Self { usage_due: Instant::now(), history_due: Instant::now() }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_poller(
     client: Client,
     data: Shared,
@@ -113,28 +184,14 @@ pub fn spawn_poller(
     std::thread::Builder::new()
         .name("poller".into())
         .spawn(move || {
-            let mut usage_due = Instant::now();
-            let mut history_due = Instant::now();
+            let mut timers = Timers::new();
             loop {
-                poll(&client, &data, &mut usage_due, &mut history_due);
+                // The native client blocks, so these futures complete in one poll.
+                pollster::block_on(poll(&client, &data, &mut timers));
                 repaint();
                 match rx.recv_timeout(Duration::from_secs(1)) {
-                    Ok(Request::Usage(days)) => {
-                        lock(&data).usage_days = days;
-                        usage_due = Instant::now();
-                    }
-                    Ok(Request::Remotes(app)) => {
-                        let mut d = lock(&data);
-                        d.remotes.clear();
-                        d.remotes_app = app;
-                    }
-                    Ok(Request::History(query)) => {
-                        let mut d = lock(&data);
-                        d.history = None;
-                        d.history_query = query;
-                        history_due = Instant::now();
-                    }
-                    Ok(Request::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Ok(request) => pollster::block_on(handle(&client, &data, request, &mut timers)),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
@@ -143,8 +200,33 @@ pub fn spawn_poller(
     tx
 }
 
-fn poll(client: &Client, data: &Shared, usage_due: &mut Instant, history_due: &mut Instant) {
-    let overview: Overview = match client.get("/api/overview") {
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_poller(client: Client, data: Shared, repaint: impl Fn() + 'static) -> mpsc::Sender<Request> {
+    let (tx, rx) = mpsc::channel();
+    wasm_bindgen_futures::spawn_local(async move {
+        let mut timers = Timers::new();
+        loop {
+            poll(&client, &data, &mut timers).await;
+            repaint();
+            // Wait for the next second, or less if the UI asks for something.
+            let next = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < next {
+                match rx.try_recv() {
+                    Ok(request) => {
+                        handle(&client, &data, request, &mut timers).await;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => crate::client::sleep(50).await,
+                    Err(mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+        }
+    });
+    tx
+}
+
+async fn poll(client: &Client, data: &Shared, timers: &mut Timers) {
+    let overview: Overview = match client.get("/api/overview").await {
         Ok(o) => o,
         Err(e) => {
             let mut d = lock(data);
@@ -158,28 +240,31 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant, history_due: &m
     let initial = if primed {
         None
     } else {
-        let system: Vec<(u64, u64)> = client.get("/api/system/history").unwrap_or_default();
-        let apps: Vec<AppView> = client.get("/api/apps").unwrap_or_default();
+        let system: Vec<(u64, u64)> = client.get("/api/system/history").await.unwrap_or_default();
+        let apps: Vec<AppView> = client.get("/api/apps").await.unwrap_or_default();
         Some((system, apps))
     };
-    let status: Option<Status> = client.get("/api/status").ok();
-    let rules: Option<Vec<Rule>> = client.get("/api/rules").ok();
-    let connections: Option<Vec<ConnView>> = client.get("/api/connections").ok();
+    let status: Option<Status> = client.get("/api/status").await.ok();
+    let rules: Option<Vec<Rule>> = client.get("/api/rules").await.ok();
+    let connections: Option<Vec<ConnView>> = client.get("/api/connections").await.ok();
     let last_event = lock(data).last_event;
     let events: Vec<Event> = if overview.last_event > last_event {
-        client.get(&format!("/api/events?after={last_event}")).unwrap_or_default()
+        client.get(&format!("/api/events?after={last_event}")).await.unwrap_or_default()
     } else {
         vec![]
     };
     let remotes_app = lock(data).remotes_app.clone();
-    let remotes: Option<Vec<RemoteView>> = remotes_app.as_ref().and_then(|app| {
-        client.get(&format!("/api/remotes?limit=20&app={}", crate::client::encode(&app.0))).ok()
-    });
+    let remotes: Option<Vec<RemoteView>> = match &remotes_app {
+        Some(app) => {
+            client.get(&format!("/api/remotes?limit=20&app={}", crate::client::encode(&app.0))).await.ok()
+        }
+        None => None,
+    };
     // History changes slowly (minute buckets): refresh every 10 s.
     let history_query = lock(data).history_query.clone();
     let history: Option<HistoryView> = match &history_query {
-        Some((range, app)) if Instant::now() >= *history_due => {
-            *history_due = Instant::now() + Duration::from_secs(10);
+        Some((range, app)) if Instant::now() >= timers.history_due => {
+            timers.history_due = Instant::now() + Duration::from_secs(10);
             let range = serde_json::to_value(range)
                 .ok()
                 .and_then(|v| v.as_str().map(String::from))
@@ -188,14 +273,14 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant, history_due: &m
             if let Some(a) = app {
                 path += &format!("&app={}", crate::client::encode(&a.0));
             }
-            client.get(&path).ok()
+            client.get(&path).await.ok()
         }
         _ => None,
     };
     let usage_days = lock(data).usage_days.max(7);
-    let usage: Option<Vec<UsageDay>> = if Instant::now() >= *usage_due {
-        *usage_due = Instant::now() + Duration::from_secs(10);
-        client.get(&format!("/api/usage?days={usage_days}")).ok()
+    let usage: Option<Vec<UsageDay>> = if Instant::now() >= timers.usage_due {
+        timers.usage_due = Instant::now() + Duration::from_secs(10);
+        client.get(&format!("/api/usage?days={usage_days}")).await.ok()
     } else {
         None
     };
@@ -256,6 +341,7 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant, history_due: &m
     drop(d);
     // Shown outside the lock: talking to the notification service can take
     // a moment and the UI must not wait for it.
+    #[cfg(not(target_arch = "wasm32"))]
     for (title, body, buttons) in notifications {
         let result = match buttons {
             Some((app, name, buttons)) => {
@@ -268,4 +354,7 @@ fn poll(client: &Client, data: &Shared, usage_due: &mut Instant, history_due: &m
         };
         lock(data).notify_error = result.err();
     }
+    // The browser shows no notifications (the setting is off there).
+    #[cfg(target_arch = "wasm32")]
+    drop(notifications);
 }

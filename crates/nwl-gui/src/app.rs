@@ -1,7 +1,7 @@
 //! The desktop UI.
 
 use crate::client::Client;
-use crate::data::{lock, Request, Shared, HISTORY, SPARK};
+use crate::data::{lock, Call, Request, Shared, HISTORY, SPARK};
 use eframe::egui::{self, Color32, RichText, Stroke, Ui};
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Bar, BarChart, Line, Plot};
@@ -13,7 +13,8 @@ use nwl_core::rules::{Day, Period, Rule, TimeOfDay};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 const DOWN: Color32 = Color32::from_rgb(59, 130, 246);
 const UP: Color32 = Color32::from_rgb(236, 72, 153);
@@ -191,7 +192,6 @@ pub struct NwlApp {
     limit: Option<LimitDialog>,
     form: RuleForm,
     usage_days: usize,
-    dark: bool,
     show_notify_settings: bool,
     history_range: Range,
     /// App the History tab is filtered to; `None` for all traffic.
@@ -222,7 +222,6 @@ impl NwlApp {
         poller: Sender<Request>,
         start_hidden: bool,
     ) -> Self {
-        let dark = ctx.global_style().visuals.dark_mode;
         let _ = poller.send(Request::Usage(30));
         Self {
             client,
@@ -236,7 +235,6 @@ impl NwlApp {
             limit: None,
             form: RuleForm::default(),
             usage_days: 30,
-            dark,
             show_notify_settings: false,
             history_range: Range::Day,
             history_app: None,
@@ -253,23 +251,16 @@ impl NwlApp {
         }
     }
 
-    /// Runs one API call (fast: the daemon is local), reports the outcome as a
-    /// toast and refreshes.
-    fn act(&self, method: &str, path: &str, body: Option<Value>, done: &str) -> Result<Value, String> {
-        let result = self.client.call(method, path, body);
-        let toast = match &result {
-            Ok(_) => (done.to_string(), true, Instant::now()),
-            Err(e) => (e.clone(), false, Instant::now()),
-        };
-        lock(&self.data).toast = Some(toast);
-        let _ = self.poller.send(Request::Refresh);
-        result
+    /// Runs one API call in the background; the outcome shows as a toast and
+    /// the views refresh.
+    fn act(&self, method: &'static str, path: &str, body: Option<Value>, done: &str) {
+        let _ = self.poller.send(Request::Call(Call::new(method, path, body, done)));
     }
 
     /// Pauses or resumes all rules in the daemon.
     pub fn set_paused(&self, paused: bool) {
         let done = if paused { "All rules paused" } else { "Rules resumed" };
-        let _ = self.act("POST", "/api/pause", Some(json!({ "paused": paused })), done);
+        self.act("POST", "/api/pause", Some(json!({ "paused": paused })), done);
     }
 
     fn header(&mut self, ui: &mut Ui) {
@@ -318,17 +309,16 @@ impl NwlApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⚙").on_hover_text("Settings: notifications and startup").clicked() {
+                // Notifications and startup are the desktop app's; a browser tab has neither.
+                let desktop = cfg!(not(target_arch = "wasm32"));
+                if desktop && ui.button("⚙").on_hover_text("Settings: notifications and startup").clicked()
+                {
                     self.show_notify_settings = !self.show_notify_settings;
                 }
-                let icon = if self.dark { "☀" } else { "🌙" };
-                if ui.button(icon).on_hover_text("Toggle theme").clicked() {
-                    self.dark = !self.dark;
-                    ui.ctx().set_visuals(if self.dark {
-                        egui::Visuals::dark()
-                    } else {
-                        egui::Visuals::light()
-                    });
+                // Follows the system theme until toggled.
+                let dark = ui.visuals().dark_mode;
+                if ui.button(if dark { "☀" } else { "🌙" }).on_hover_text("Toggle theme").clicked() {
+                    ui.ctx().set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
                 }
                 if let Some(o) = &d.overview {
                     let s = &o.system;
@@ -645,8 +635,11 @@ impl NwlApp {
             }
         }
         if test {
-            let result = crate::notify::show("NattoWok Limiter", "Notifications are working.");
-            lock(&self.data).notify_error = result.err();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let result = crate::notify::show("NattoWok Limiter", "Notifications are working.");
+                lock(&self.data).notify_error = result.err();
+            }
         }
         self.show_notify_settings = open;
     }
@@ -695,8 +688,8 @@ impl NwlApp {
                     &format!("/api/rules/{id}"),
                     None,
                     &format!("Removed limit of {}", dialog.name),
-                )
-                .is_err()
+                );
+                false
             }
             Some(_) => {
                 let parse = |s: &str| -> Result<Option<u64>, String> {
@@ -709,7 +702,8 @@ impl NwlApp {
                 match (parse(&dialog.down), parse(&dialog.up)) {
                     (Ok(None), Ok(None)) => match dialog.rule {
                         Some(id) => {
-                            self.act("DELETE", &format!("/api/rules/{id}"), None, "Limit removed").is_err()
+                            self.act("DELETE", &format!("/api/rules/{id}"), None, "Limit removed");
+                            false
                         }
                         None => false,
                     },
@@ -719,7 +713,8 @@ impl NwlApp {
                             Some(id) => ("PUT", format!("/api/rules/{id}")),
                             None => ("POST", "/api/rules".to_string()),
                         };
-                        self.act(method, &path, Some(body), &format!("Limited {}", dialog.name)).is_err()
+                        self.act(method, &path, Some(body), &format!("Limited {}", dialog.name));
+                        false
                     }
                     (Err(e), _) | (_, Err(e)) => {
                         self.limit = Some(LimitDialog { error: Some(e), ..dialog });
@@ -855,7 +850,7 @@ impl NwlApp {
         });
         if let Some((id, what, i)) = op {
             let path = format!("/api/rules/{id}");
-            let _ = match what {
+            match what {
                 "delete" => self.act("DELETE", &path, None, &format!("Deleted rule #{id}")),
                 "up" | "down" => {
                     let index = if what == "up" { i - 1 } else { i + 1 };
@@ -866,7 +861,7 @@ impl NwlApp {
                     rule.enabled = what == "enable";
                     self.act("PUT", &path, serde_json::to_value(rule).ok(), &format!("Rule #{id} {what}d"))
                 }
-            };
+            }
         }
     }
 
@@ -983,17 +978,18 @@ impl NwlApp {
             match self.form.build() {
                 Err(e) => self.form.error = Some(e),
                 Ok(rule) => {
-                    let result = self.client.call("POST", "/api/rules", Some(rule));
-                    let _ = self.poller.send(Request::Refresh);
-                    match result {
-                        Ok(_) => {
-                            self.form = RuleForm::default();
-                            lock(&self.data).toast = Some(("Rule added".into(), true, Instant::now()));
-                        }
-                        Err(e) => self.form.error = Some(e),
-                    }
+                    self.form.error = None;
+                    let call =
+                        Call { rule_form: true, ..Call::new("POST", "/api/rules", Some(rule), "Rule added") };
+                    let _ = self.poller.send(Request::Call(call));
                 }
             }
+        }
+        // The daemon's answer to the last submission.
+        match lock(&self.data).rule_form_result.take() {
+            Some(Ok(())) => self.form = RuleForm::default(),
+            Some(Err(e)) => self.form.error = Some(e),
+            None => {}
         }
     }
 
@@ -1159,10 +1155,14 @@ impl NwlApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("Export CSV")
-                    .on_hover_text("Save this range as CSV in your Downloads folder")
+                    .on_hover_text(if cfg!(target_arch = "wasm32") {
+                        "Download this range as CSV"
+                    } else {
+                        "Save this range as CSV in your Downloads folder"
+                    })
                     .clicked()
                 {
-                    self.export_history();
+                    self.export_history(ui.ctx());
                 }
             });
         });
@@ -1256,8 +1256,9 @@ impl NwlApp {
         }
     }
 
-    /// Saves the current history view as CSV in the Downloads folder.
-    fn export_history(&self) {
+    /// Saves the current history view as CSV in the Downloads folder (in the
+    /// browser: downloads it).
+    fn export_history(&self, ctx: &egui::Context) {
         let range = serde_json::to_value(self.history_range)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
@@ -1271,16 +1272,26 @@ impl NwlApp {
                 app.display_name().replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
             );
         }
-        let result = self.client.get_text(&path).and_then(|csv| {
-            let dir = downloads_dir();
-            let file = dir.join(format!("{name}.csv"));
-            std::fs::write(&file, csv).map_err(|e| format!("saving {}: {e}", file.display()))?;
-            Ok(file)
-        });
-        lock(&self.data).toast = Some(match result {
-            Ok(file) => (format!("Saved {}", file.display()), true, Instant::now()),
-            Err(e) => (e, false, Instant::now()),
-        });
+        #[cfg(target_arch = "wasm32")]
+        {
+            // The daemon names the file and marks it as a download.
+            let _ = name;
+            ctx.open_url(egui::OpenUrl::same_tab(format!("{}{path}", self.client.base())));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = ctx;
+            let result = self.client.get_text(&path).and_then(|csv| {
+                let dir = downloads_dir();
+                let file = dir.join(format!("{name}.csv"));
+                std::fs::write(&file, csv).map_err(|e| format!("saving {}: {e}", file.display()))?;
+                Ok(file)
+            });
+            lock(&self.data).toast = Some(match result {
+                Ok(file) => (format!("Saved {}", file.display()), true, Instant::now()),
+                Err(e) => (e, false, Instant::now()),
+            });
+        }
     }
 
     fn events_tab(&self, ui: &mut Ui) {
@@ -1380,6 +1391,7 @@ fn local_time_label(unix: i64, step: i64) -> String {
 }
 
 /// The user's Downloads folder, or their home folder.
+#[cfg(not(target_arch = "wasm32"))]
 fn downloads_dir() -> std::path::PathBuf {
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(std::path::PathBuf::from)
@@ -1656,7 +1668,7 @@ impl NwlApp {
     /// Runs a one-click action (block, limit, ...) on an app.
     fn quick_action(&self, target: &crate::actions::Target, action: &crate::actions::QuickAction) {
         if let Some(r) = crate::actions::request(target, action) {
-            let _ = self.act(r.method, &r.path, r.body, &r.done);
+            self.act(r.method, &r.path, r.body, &r.done);
         }
     }
 

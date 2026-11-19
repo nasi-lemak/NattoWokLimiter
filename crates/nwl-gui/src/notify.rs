@@ -54,6 +54,10 @@ fn config_path() -> Option<PathBuf> {
 
 impl Settings {
     pub fn load() -> Self {
+        // A browser tab shows no system notifications.
+        if cfg!(target_arch = "wasm32") {
+            return Self { enabled: false, ..Self::default() };
+        }
         config_path()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -154,6 +158,7 @@ pub fn buttons(kind: &EventKind) -> Option<(AppId, String, Vec<Button>)> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Shows a notification with buttons; `on_click` runs on a background
 /// thread with the chosen button's action. Buttons need the freedesktop
 /// notification service; elsewhere the notification is shown without them.
@@ -188,6 +193,7 @@ pub fn show_with_buttons(
 }
 
 /// Shows a system notification.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn show(title: &str, body: &str) -> Result<(), String> {
     notify_rust::Notification::new()
         .appname("NattoWok Limiter")
