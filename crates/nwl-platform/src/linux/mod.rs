@@ -9,6 +9,7 @@
 
 mod cgroup;
 pub mod ebpf;
+pub mod netman;
 pub mod nft;
 pub mod procfs;
 pub mod sockdiag;

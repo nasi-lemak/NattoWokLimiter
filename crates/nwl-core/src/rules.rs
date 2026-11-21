@@ -36,6 +36,9 @@ pub struct Rule {
     /// When set, the rule only applies inside this weekly time window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    /// When set, the rule only applies on matching networks (e.g. metered).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<crate::network::NetworkCondition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -461,6 +464,9 @@ impl Rule {
         if let Some(s) = &self.schedule {
             parts.push(s.to_string());
         }
+        if let Some(n) = &self.network {
+            parts.push(n.to_string());
+        }
         parts.join(" · ")
     }
 }
@@ -536,14 +542,17 @@ impl RuleSet {
         self.rules.iter().filter(|r| r.enabled)
     }
 
-    /// The rules in effect at a local time: rules whose schedule does not
-    /// cover it are disabled. Everything downstream (decisions, quotas,
-    /// enforcement) works on this view.
-    pub fn effective_at(&self, day: Day, minute: u16) -> RuleSet {
+    /// The rules in effect at a local time on a network: rules whose
+    /// schedule or network condition doesn't hold are disabled. Everything
+    /// downstream (decisions, quotas, enforcement) works on this view.
+    pub fn effective_at(&self, day: Day, minute: u16, network: &crate::network::Network) -> RuleSet {
         let mut set = self.clone();
         for rule in &mut set.rules {
             if let Some(schedule) = &rule.schedule {
                 rule.enabled &= schedule.active(day, minute);
+            }
+            if let Some(condition) = &rule.network {
+                rule.enabled &= condition.active(network);
             }
         }
         set
@@ -592,6 +601,9 @@ fn validate(rule: &Rule) -> Result<(), RuleError> {
         }
         _ if rule.schedule.as_ref().is_some_and(|s| s.from.is_some() != s.until.is_some()) => {
             invalid("a schedule needs both `from` and `until`, or neither")
+        }
+        _ if rule.network.as_ref().is_some_and(|n| n.is_empty()) => {
+            invalid("a network condition needs `metered` and/or network `names`")
         }
         _ => Ok(()),
     }
@@ -793,11 +805,28 @@ mod tests {
             r#"{"match":{"app":"steam"},"action":{"type":"block"},"schedule":{"days":["mon"],"from":"09:00","until":"17:00"}}"#,
         )])
         .unwrap();
-        assert_eq!(set.effective_at(Day::Mon, 600).enabled().count(), 1);
-        assert_eq!(set.effective_at(Day::Mon, 1200).enabled().count(), 0);
+        let net = crate::network::Network::default();
+        assert_eq!(set.effective_at(Day::Mon, 600, &net).enabled().count(), 1);
+        assert_eq!(set.effective_at(Day::Mon, 1200, &net).enabled().count(), 0);
         assert!(set.rules[0].enabled, "the stored rule is untouched");
         let half = r#"{"action":{"type":"allow"},"schedule":{"from":"09:00"}}"#;
         assert!(RuleSet::default().add(rule(half)).is_err());
+    }
+
+    #[test]
+    fn effective_rules_follow_the_network() {
+        use crate::network::Network;
+        let set = RuleSet::new(vec![rule(
+            r#"{"match":{"app":"steam"},"action":{"type":"block"},"network":{"metered":true}}"#,
+        )])
+        .unwrap();
+        let hotspot = Network { name: Some("Pixel".into()), metered: true };
+        let home = Network { name: Some("Home".into()), metered: false };
+        assert_eq!(set.effective_at(Day::Mon, 600, &hotspot).enabled().count(), 1);
+        assert_eq!(set.effective_at(Day::Mon, 600, &home).enabled().count(), 0);
+        assert_eq!(set.rules[0].scope_summary(), "app steam · on metered networks");
+        let empty = r#"{"action":{"type":"block"},"network":{}}"#;
+        assert!(RuleSet::default().add(rule(empty)).is_err());
     }
 
     #[test]

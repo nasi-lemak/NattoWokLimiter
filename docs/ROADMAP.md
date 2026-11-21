@@ -29,8 +29,9 @@ trade-offs stay visible.
   often CDN hosts. Snooping the app's own DNS answers would show the name it actually asked for
   (`api.example.com`), and would let rules match domains (`*.doubleclick.net`).
 - **GeoIP and ASN** for connection details and rules ("block this app outside my country").
-- **Profiles.** Schedules are done (rules active on chosen days and times). Next: rule sets that
-  switch automatically per network, e.g. a "metered connection" profile keyed by SSID or gateway MAC.
+- **Profiles.** Schedules and network conditions are done (rules for metered networks or named
+  networks, with detection via NetworkManager and Windows connection cost). Next: detection without
+  NetworkManager (systemd-networkd, gateway MAC), and a mobile-data budget across all apps.
 - **Per-connection actions** from the connection list: kill, block remote, limit.
 
 ## Insight

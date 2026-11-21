@@ -66,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/rules/:id", put(replace_rule).delete(remove_rule))
         .route("/api/rules/:id/move", post(move_rule))
         .route("/api/pause", post(pause))
+        .route("/api/network", get(network).put(set_network))
         .route("/api/quotas", get(quotas))
         .route("/api/events", get(events))
         .route("/api/usage", get(usage))
@@ -265,6 +266,26 @@ async fn pause(State(s): State<AppState>, Json(body): Json<PauseBody>) -> Respon
     Json(s.engine().status.clone()).into_response()
 }
 
+async fn network(State(s): State<AppState>) -> impl IntoResponse {
+    Json(s.engine().network_view())
+}
+
+#[derive(Deserialize)]
+struct NetworkBody {
+    /// Treat the current network as metered (`true`), not (`false`), or as
+    /// detected (`null`).
+    metered: Option<bool>,
+}
+
+async fn set_network(State(s): State<AppState>, Json(body): Json<NetworkBody>) -> Response {
+    let result = s.engine().set_metered(body.metered);
+    if let Err(e) = result {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("saving the network setting: {e:#}"));
+    }
+    s.reapply();
+    Json(s.engine().network_view()).into_response()
+}
+
 #[derive(Deserialize)]
 struct MoveBody {
     index: usize,
@@ -440,6 +461,22 @@ mod tests {
         for bad in ["evil.com", "127.0.0.1.evil.com:80", "", "[::2]:1", "localhost.evil:1"] {
             assert!(!is_loopback_host(bad), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn network_override() {
+        let (app, wake) = app();
+        let (code, view) = call(&app, "GET", "/api/network", "localhost", false, "").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(view["metered"], false);
+        let (code, _) = call(&app, "PUT", "/api/network", "localhost", false, r#"{"metered":true}"#).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "changing it needs the client header");
+        let (code, view) = call(&app, "PUT", "/api/network", "localhost", true, r#"{"metered":true}"#).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!((view["metered"].clone(), view["overridden"].clone()), (json!(true), json!(true)));
+        assert_eq!(wake.try_recv(), Ok(Wake::Reapply), "rules are re-applied at once");
+        let (_, view) = call(&app, "PUT", "/api/network", "localhost", true, r#"{"metered":null}"#).await;
+        assert_eq!((view["metered"].clone(), view.get("overridden")), (json!(false), None));
     }
 
     #[tokio::test]

@@ -28,8 +28,9 @@ There are three front ends over the same daemon:
 
 * **`nattowok`**, the native desktop app (Rust, egui): live traffic graph, per-app sparklines,
   one-click block and limit, a connection inspector with host names and RTT, a rules editor with
-  schedules, traffic history graphs from the last hour to the last 90 days with CSV export, data
-  usage per day and an event log. It can start with your login, in the tray.
+  schedules and network conditions (e.g. only on a phone hotspot), traffic history graphs from the
+  last hour to the last 90 days with CSV export, data usage per day and an event log. It can start
+  with your login, in the tray.
 * **The web dashboard**, served by the daemon at <http://127.0.0.1:7657>: the same app compiled to
   WebAssembly, so it has the same views, with nothing to install. (No tray, notifications or
   start-at-login there; those are the desktop app's.)
@@ -46,6 +47,7 @@ There are three front ends over the same daemon:
 | Bandwidth limits per app or network, download **and** upload | ✅ nftables policing | ⚠️ upload only (QoS policy) |
 | Data quotas per day/week/month, warning at 80%, auto-block when reached | ✅ | ✅ |
 | Schedules: rules active on chosen days and times (overnight windows too) | ✅ | ✅ |
+| Network rules: apply only on metered networks (phone hotspots, mobile data) or on named networks; mark any network metered | ✅ via NetworkManager | ✅ connection cost (untested) |
 | Host names of remote addresses (reverse DNS, cached, in the background) | ✅ | ✅ |
 | "Who is this app talking to?": remote hosts per app with bytes, ports, protocols | ✅ | ✅ |
 | Usage history per app per day (400 days) | ✅ | ✅ |
@@ -126,9 +128,12 @@ nwl block APP [--direction in|out|both]          [WHEN]
 nwl limit APP [--down RATE] [--up RATE]          [WHEN]
 nwl quota APP SIZE [--per day|week|month] [--direction in|out|both] [WHEN]
       WHEN: --days mon,tue,…|weekdays|weekends  --from HH:MM --until HH:MM
+            --metered | --unmetered  --network NAME
 nwl add '<rule json>'            any rule, see below
 nwl rm ID | enable ID | disable ID
 nwl pause | resume               stop / restart all blocking and limiting
+nwl network [metered|unmetered|auto]
+                                 the current network; mark it metered or not (remembered)
 nwl usage [--days N]             data used per app
 nwl history [--range R] [--app PATH] [--csv]
                                  traffic over hour|day|week|month|quarter, as a chart or CSV
@@ -159,7 +164,8 @@ managed through the UI, CLI or API.
     "uid": 1000
   },
   "action": { "type": "limit", "download": "5MB/s", "upload": "1MB/s" },
-  "schedule": { "days": ["mon", "tue", "wed", "thu", "fri"], "from": "09:00", "until": "17:00" }
+  "schedule": { "days": ["mon", "tue", "wed", "thu", "fri"], "from": "09:00", "until": "17:00" },
+  "network": { "metered": true }
 }
 ```
 
@@ -178,6 +184,16 @@ A `schedule` makes a rule apply only inside a weekly window, in local time. With
 every day; without `from`/`until` it applies all day. A window that ends before it starts runs
 overnight (`22:00`–`06:00`), and `days` then names the day it starts on. Outside its window a rule
 behaves as if disabled: a scheduled quota doesn't count traffic and doesn't block.
+
+A `network` condition makes a rule apply only on some networks: `{"metered": true}` (or `false`) and/or
+`{"names": ["Pixel 8", "Office"]}`, matched against the primary connection's name (for Wi-Fi usually
+its SSID), ignoring case. With both, both must hold. It's made for laptops on a phone hotspot:
+`nwl block steam --metered` or `nwl quota dropbox 500MB --per day --metered` cost nothing at home.
+On Linux, NetworkManager says whether the connection is metered and recognizes Android hotspots by
+itself. On Windows, a network is metered when "Set as metered connection" is on in its settings, or
+for mobile broadband. Wherever detection is missing or wrong, mark the network yourself, with
+`nwl network metered` or the network menu in the app's header; the choice is remembered per network.
+Off the matching networks a rule behaves as if disabled, like outside its schedule.
 
 Localhost traffic is never counted or policed unless the daemon runs with `--include-loopback`. It
 never reaches your ISP, and throttling it breaks local apps.
@@ -244,6 +260,7 @@ pages).
 | PUT/DELETE | `/api/rules/{id}` | replace / delete |
 | POST | `/api/rules/{id}/move` | `{"index": n}` reorder |
 | POST | `/api/pause` | `{"paused": true}` pauses all rules, `false` resumes |
+| GET/PUT | `/api/network` | the current network; `{"metered": true \| false \| null}` overrides detection for it |
 | GET | `/api/quotas` | quota usage in the current period |
 | GET | `/api/usage?days=N` | per-app bytes per day |
 | GET | `/api/usage.csv?days=N` | the same as a CSV download |

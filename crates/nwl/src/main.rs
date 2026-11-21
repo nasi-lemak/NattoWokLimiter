@@ -56,6 +56,16 @@ struct When {
     /// End of the daily window, `HH:MM`; before --from means overnight.
     #[arg(long, requires = "from")]
     until: Option<TimeOfDay>,
+    /// Only on metered networks (phone hotspots, mobile data, or networks
+    /// marked metered with `nwl network metered`).
+    #[arg(long, conflicts_with = "unmetered")]
+    metered: bool,
+    /// Only on unmetered networks.
+    #[arg(long)]
+    unmetered: bool,
+    /// Only on the network with this name (Wi-Fi: its SSID); repeat for several.
+    #[arg(long = "network", value_name = "NAME")]
+    networks: Vec<String>,
 }
 
 impl When {
@@ -75,6 +85,30 @@ impl When {
         days.dedup();
         Ok(json!({"days": days, "from": self.from, "until": self.until}))
     }
+
+    fn network(&self) -> Value {
+        let metered = if self.metered {
+            Some(true)
+        } else if self.unmetered {
+            Some(false)
+        } else {
+            None
+        };
+        if metered.is_none() && self.networks.is_empty() {
+            return Value::Null;
+        }
+        json!({"metered": metered, "names": self.networks})
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Treat {
+    /// Treat the current network as metered.
+    Metered,
+    /// Treat it as not metered.
+    Unmetered,
+    /// Go by what the system detects.
+    Auto,
 }
 
 #[derive(Subcommand)]
@@ -146,6 +180,12 @@ enum Cmd {
     Pause,
     /// Resume all rules.
     Resume,
+    /// Show the current network, or mark it metered or not (remembered per
+    /// network). Rules made with `--metered` apply only on metered networks.
+    Network {
+        #[arg(value_enum)]
+        set: Option<Treat>,
+    },
     /// Data used per application over recent days.
     Usage {
         #[arg(long, default_value_t = 7)]
@@ -282,13 +322,28 @@ fn describe_rule(r: &Value) -> String {
     }
 }
 
-/// Adds `schedule` to a rule when one was given.
+/// Adds `schedule` and `network` conditions to a rule when given.
 fn with_schedule(mut rule: Value, when: &When) -> anyhow::Result<Value> {
     let schedule = when.schedule()?;
     if !schedule.is_null() {
         rule["schedule"] = schedule;
     }
+    let network = when.network();
+    if !network.is_null() {
+        rule["network"] = network;
+    }
     Ok(rule)
+}
+
+fn print_network(n: &Value) {
+    let name = n["name"].as_str().unwrap_or("(unnamed)");
+    let metered = if n["metered"] == true { "metered" } else { "not metered" };
+    let how = match (n["overridden"].as_bool(), n["detected"].as_bool()) {
+        (Some(_), _) => "set by you".to_string(),
+        (None, Some(_)) => format!("detected by {}", n["source"].as_str().unwrap_or("the system")),
+        (None, None) => "can't be detected; mark it with `nwl network metered`".to_string(),
+    };
+    println!("network   {name}: {metered} ({how})");
 }
 
 fn print_top(c: &Client, limit: usize) -> anyhow::Result<()> {
@@ -385,6 +440,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             for w in e["warnings"].as_array().into_iter().flatten() {
                 println!("warning   {}", w.as_str().unwrap_or(""));
             }
+            print_network(&c.get("/api/network")?);
         }
         Cmd::Top { .. } if cli.json => raw("/api/apps")?,
         Cmd::Top { watch, limit } => loop {
@@ -513,6 +569,24 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 "{}",
                 if paused { "all rules paused (resume with `nwl resume`)" } else { "rules resumed" }
             );
+        }
+        Cmd::Network { set } => {
+            let view = match set {
+                None => c.get("/api/network")?,
+                Some(m) => {
+                    let metered = match m {
+                        Treat::Metered => json!(true),
+                        Treat::Unmetered => json!(false),
+                        Treat::Auto => Value::Null,
+                    };
+                    c.call("PUT", "/api/network", Some(json!({ "metered": metered })))?
+                }
+            };
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                print_network(&view);
+            }
         }
         Cmd::Usage { days } if cli.json => raw(&format!("/api/usage?days={days}"))?,
         Cmd::Usage { days } => {

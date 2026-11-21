@@ -12,6 +12,9 @@
 //! | Linux    | `NETLINK_SOCK_DIAG` + `/proc`, eBPF byte counters | cgroup v2 + nftables |
 //! | Windows  | IP Helper (`GetExtendedTcpTable`, TCP EStats) | Windows Firewall + QoS policies |
 //! | any      | [`sim::SimulatedMonitor`] (demo data) | [`NullEnforcer`] (monitor only) |
+//!
+//! [`network`] detects which network the machine is on and whether it is
+//! metered.
 
 use nwl_core::model::{AppId, Snapshot};
 use nwl_core::rules::{Action, RuleId, RuleSet};
@@ -19,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod network;
 pub mod sim;
 #[cfg(windows)]
 pub mod windows;

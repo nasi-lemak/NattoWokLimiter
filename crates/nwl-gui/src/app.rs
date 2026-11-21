@@ -80,6 +80,10 @@ struct RuleForm {
     days: [bool; 7],
     from: String,
     until: String,
+    /// Only on metered (`Some(true)`) or unmetered networks.
+    metered: Option<bool>,
+    /// Only on networks with these names (comma-separated).
+    networks: String,
     error: Option<String>,
 }
 
@@ -102,6 +106,8 @@ impl Default for RuleForm {
             days: [false; 7],
             from: String::new(),
             until: String::new(),
+            metered: None,
+            networks: String::new(),
             error: None,
         }
     }
@@ -175,6 +181,11 @@ impl RuleForm {
                 sched["until"] = json!(until.parse::<TimeOfDay>()?);
             }
             rule["schedule"] = sched;
+        }
+        // Network names may contain spaces, so only commas separate them.
+        let names: Vec<&str> = self.networks.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+        if self.metered.is_some() || !names.is_empty() {
+            rule["network"] = json!({"metered": self.metered, "names": names});
         }
         Ok(rule)
     }
@@ -268,6 +279,7 @@ impl NwlApp {
     fn header(&mut self, ui: &mut Ui) {
         let d = lock(&self.data);
         let mut toggle_pause: Option<bool> = None;
+        let mut set_metered: Option<(Option<bool>, String)> = None;
         ui.horizontal(|ui| {
             let (logo, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
             ui.painter().circle_filled(logo.center(), 11.0, ACCENT);
@@ -310,6 +322,11 @@ impl NwlApp {
                     toggle_pause = Some(!paused);
                 }
             }
+            if let Some(net) = d.overview.as_ref().map(|o| &o.network).filter(|_| d.connected) {
+                if let Some(choice) = network_menu(ui, net) {
+                    set_metered = Some((choice, net.name.clone().unwrap_or_else(|| "this network".into())));
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Notifications and startup are the desktop app's; a browser tab has neither.
                 let desktop = cfg!(not(target_arch = "wasm32"));
@@ -333,6 +350,14 @@ impl NwlApp {
         drop(d);
         if let Some(paused) = toggle_pause {
             self.set_paused(paused);
+        }
+        if let Some((metered, name)) = set_metered {
+            let done = match metered {
+                Some(true) => format!("{name} is treated as metered"),
+                Some(false) => format!("{name} is treated as not metered"),
+                None => format!("{name}: metered as detected"),
+            };
+            self.act("PUT", "/api/network", Some(json!({ "metered": metered })), &done);
         }
     }
 
@@ -607,6 +632,10 @@ impl NwlApp {
                             "A quota is used up and its traffic blocked",
                         );
                         ui.checkbox(&mut settings.enforcement, "Rules stop (or start again) being applied");
+                        ui.checkbox(
+                            &mut settings.network,
+                            "You join a metered network, or network rules switch",
+                        );
                     });
                 });
                 ui.add_space(4.0);
@@ -992,8 +1021,24 @@ impl NwlApp {
                     ui.add(egui::TextEdit::singleline(&mut f.until).hint_text("17:00").desired_width(60.0));
                 });
                 ui.end_row();
+
+                ui.label("Network");
+                egui::ComboBox::from_id_salt("metered").selected_text(metered_label(f.metered)).show_ui(
+                    ui,
+                    |ui| {
+                        for choice in [None, Some(true), Some(false)] {
+                            ui.selectable_value(&mut f.metered, choice, metered_label(choice));
+                        }
+                    },
+                );
+                ui.label("Network names");
+                ui.add(egui::TextEdit::singleline(&mut f.networks).hint_text("Home, Pixel 8 (any)"));
+                ui.end_row();
             });
-            ui.weak("No days and no time means always active.");
+            ui.weak(
+                "No days and no time means always active. Metered networks are phone hotspots and mobile \
+                 data, or any network you mark as metered.",
+            );
             if let Some(e) = &f.error {
                 ui.colored_label(BAD, e);
             }
@@ -1343,6 +1388,11 @@ impl NwlApp {
                         EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(OK)),
                         EventKind::Paused => ("All rules paused".into(), Some(ACCENT)),
                         EventKind::Resumed => ("All rules resumed".into(), Some(OK)),
+                        EventKind::NetworkChanged { name, metered, rules } => {
+                            let kind = if *metered { "metered" } else { "unmetered" };
+                            let name = name.as_deref().map_or(String::new(), |n| format!(" {n}"));
+                            (format!("Now on {kind} network{name}: {rules} network rule(s) apply"), metered.then_some(ACCENT))
+                        }
                         EventKind::TrafficSpike { .. } => {
                             let (title, body) = crate::notify::text(&e.kind).unwrap_or_default();
                             (format!("{title}. {body}"), Some(ACCENT))
@@ -1853,4 +1903,51 @@ impl eframe::App for NwlApp {
             }
         }
     }
+}
+
+fn metered_label(metered: Option<bool>) -> &'static str {
+    match metered {
+        None => "Any network",
+        Some(true) => "Metered only",
+        Some(false) => "Unmetered only",
+    }
+}
+
+/// The current network in the header, with the choice of treating it as
+/// metered or not. Returns the choice made (`Some(None)`: as detected).
+fn network_menu(ui: &mut Ui, net: &nwl_core::api::NetworkView) -> Option<Option<bool>> {
+    let name = net.name.as_deref().unwrap_or("Network");
+    let label = if net.metered {
+        RichText::new(format!("📶 {name} · metered")).color(ACCENT)
+    } else {
+        RichText::new(format!("📶 {name}"))
+    };
+    let mut choice = None;
+    ui.menu_button(label, |ui| {
+        ui.label(RichText::new(name).strong());
+        let detected = match net.detected {
+            Some(true) => "metered",
+            Some(false) => "not metered",
+            None => "unknown",
+        };
+        let source = if net.source.is_empty() || net.source == "none" {
+            String::new()
+        } else {
+            format!(" by {}", net.source)
+        };
+        ui.weak(format!("Detected{source}: {detected}"));
+        ui.separator();
+        ui.label("Treat this network as");
+        for (value, text) in [(None, "As detected"), (Some(true), "Metered"), (Some(false), "Not metered")] {
+            if ui.radio(net.overridden == value, text).clicked() {
+                choice = Some(value);
+                ui.close();
+            }
+        }
+        ui.add_space(4.0);
+        ui.weak("Rules can apply only on metered networks,\ne.g. a phone hotspot.");
+    })
+    .response
+    .on_hover_text("The network rules see. Click to mark it metered or not.");
+    choice
 }

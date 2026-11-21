@@ -85,6 +85,14 @@ pub enum EventKind {
     Paused,
     /// The user resumed all rules.
     Resumed,
+    /// The machine moved to another network, or its metered state changed.
+    NetworkChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        metered: bool,
+        /// Rules with a network condition that apply now.
+        rules: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +163,27 @@ pub struct Overview {
     pub quotas: Vec<QuotaStatus>,
     pub status: EnforcementStatus,
     pub last_event: u64,
+    #[serde(default)]
+    pub network: NetworkView,
+}
+
+/// The current network, what was detected and what the user overrode
+/// (`GET /api/network`; part of the overview).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Whether rules treat it as metered.
+    pub metered: bool,
+    /// What the operating system says (`None`: it can't tell).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected: Option<bool>,
+    /// The user's choice for this network (`None`: follow detection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overridden: Option<bool>,
+    /// How the network is detected, e.g. `NetworkManager`.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// `GET /api/history`: traffic over a time range.

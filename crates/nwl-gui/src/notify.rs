@@ -23,6 +23,7 @@ pub struct Settings {
     pub quota_warning: bool,
     pub quota_exhausted: bool,
     pub enforcement: bool,
+    pub network: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +35,7 @@ impl Default for Settings {
             quota_warning: true,
             quota_exhausted: true,
             enforcement: true,
+            network: true,
         }
     }
 }
@@ -81,6 +83,7 @@ impl Settings {
                 EventKind::QuotaWarning { .. } => self.quota_warning,
                 EventKind::QuotaExhausted { .. } => self.quota_exhausted,
                 EventKind::EnforcementError { .. } | EventKind::EnforcementRecovered => self.enforcement,
+                EventKind::NetworkChanged { .. } => self.network,
                 // The user made these changes themselves.
                 EventKind::RuleAdded { .. }
                 | EventKind::RuleChanged { .. }
@@ -128,6 +131,22 @@ pub fn text(kind: &EventKind) -> Option<(String, String)> {
         }
         EventKind::EnforcementRecovered => {
             ("Rules are applied again".to_string(), "Blocks and limits are active.".to_string())
+        }
+        // Moving between unmetered networks changes nothing worth a popup.
+        EventKind::NetworkChanged { metered: false, rules: 0, .. } => return None,
+        EventKind::NetworkChanged { name, metered, rules } => {
+            let name = name.as_deref().map_or(String::new(), |n| format!(" ({n})"));
+            let title = if *metered {
+                format!("On a metered network{name}")
+            } else {
+                format!("On an unmetered network{name}")
+            };
+            let body = match rules {
+                0 => "No network rules apply here.".to_string(),
+                1 => "1 network rule applies here.".to_string(),
+                n => format!("{n} network rules apply here."),
+            };
+            (title, body)
         }
         EventKind::RuleAdded { .. }
         | EventKind::RuleChanged { .. }

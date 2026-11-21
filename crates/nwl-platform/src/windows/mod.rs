@@ -6,6 +6,8 @@
 //! * Enforcement: Windows Firewall rules and QoS policies, see
 //!   [`crate::winplan`].
 
+pub mod netcost;
+
 use crate::{winplan, EnforceReport, Enforcer, Error, Monitor, Policy, Result};
 use nwl_core::model::{
     AppId, ConnKey, Connection, InterfaceCounters, ProcessInfo, Protocol, Snapshot, TcpState,

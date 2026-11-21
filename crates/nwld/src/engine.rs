@@ -6,10 +6,12 @@ use crate::resolver::Resolver;
 use crate::store::{KnownApps, Store, UsageDb};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use nwl_core::accounting::Accountant;
+use nwl_core::api::NetworkView;
 use nwl_core::api::{
     AppView, ConnView, EnforcementStatus, Event, EventKind, Overview, RemoteView, UsageDay, UsageEntry,
 };
 use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapshot};
+use nwl_core::network::{Detected, Network, Overrides};
 use nwl_core::quota::{QuotaStatus, QuotaTracker};
 use nwl_core::remotes::{RemoteStats, RemoteTracker};
 use nwl_core::rules::{Action, Day, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
@@ -22,6 +24,7 @@ const QUOTAS: &str = "quotas.json";
 const USAGE: &str = "usage.json";
 const HISTORY: &str = "history.json";
 const KNOWN_APPS: &str = "known_apps.json";
+const NETWORK: &str = "network.json";
 const MAX_EVENTS: usize = 500;
 
 pub struct Engine {
@@ -41,6 +44,13 @@ pub struct Engine {
     effective: RuleSet,
     /// Local weekday and minute of the last tick.
     clock: Option<(Day, u16)>,
+    /// The network as detected, the user's per-network "metered" choices,
+    /// and the result rules are evaluated against.
+    detected: Detected,
+    overrides: Overrides,
+    network: Network,
+    /// How the network is detected; empty until the first detection.
+    network_source: String,
     /// Quota rule -> period in which its 80% warning was raised.
     warned: HashMap<RuleId, String>,
     /// Whether quota states have been taken in since startup. The first
@@ -114,6 +124,10 @@ impl Engine {
             effective: rules.clone(),
             no_rules: RuleSet::default(),
             clock: None,
+            detected: Detected::default(),
+            overrides: store.load(NETWORK)?.unwrap_or_default(),
+            network: Network::default(),
+            network_source: String::new(),
             warned: HashMap::new(),
             quotas_primed: false,
             rules,
@@ -168,9 +182,49 @@ impl Engine {
 
     fn refresh_effective(&mut self) {
         self.effective = match self.clock {
-            Some((day, minute)) => self.rules.effective_at(day, minute),
+            Some((day, minute)) => self.rules.effective_at(day, minute, &self.network),
             None => self.rules.clone(),
         };
+    }
+
+    /// Takes in the latest network detection (polled by the daemon).
+    pub fn set_network(&mut self, source: &str, detected: Detected) {
+        let first = self.network_source.is_empty();
+        self.network_source = source.to_string();
+        self.detected = detected;
+        self.update_network(!first);
+    }
+
+    /// Treats the current network as metered or not (`None`: as detected),
+    /// remembered for this network.
+    pub fn set_metered(&mut self, metered: Option<bool>) -> anyhow::Result<()> {
+        self.overrides.set(self.detected.name.as_deref(), metered);
+        self.update_network(true);
+        self.store.save(NETWORK, &self.overrides)
+    }
+
+    fn update_network(&mut self, announce: bool) {
+        let network = self.overrides.resolve(&self.detected);
+        if network == self.network {
+            return;
+        }
+        self.network = network;
+        self.refresh_effective();
+        if announce {
+            let rules = self.effective.rules.iter().filter(|r| r.enabled && r.network.is_some()).count();
+            let Network { name, metered } = self.network.clone();
+            self.push_event(EventKind::NetworkChanged { name, metered, rules });
+        }
+    }
+
+    pub fn network_view(&self) -> NetworkView {
+        NetworkView {
+            name: self.network.name.clone(),
+            metered: self.network.metered,
+            detected: self.detected.metered,
+            overridden: self.overrides.get(self.detected.name.as_deref()),
+            source: self.network_source.clone(),
+        }
     }
 
     pub fn ingest(&mut self, snap: Snapshot, now: DateTime<Local>) {
@@ -391,8 +445,8 @@ impl Engine {
                         (None, _) => false,
                     })
                     .collect();
-                // The one-click toggles control unscheduled app-wide rules.
-                let one_click = |r: &&&Rule| app_only(r) && r.schedule.is_none();
+                // The one-click toggles control unconditional app-wide rules.
+                let one_click = |r: &&&Rule| app_only(r) && r.schedule.is_none() && r.network.is_none();
                 let block_rule = scoped
                     .iter()
                     .filter(one_click)
@@ -602,6 +656,7 @@ impl Engine {
             quotas: self.quota_status(),
             status: self.status.clone(),
             last_event: self.next_event_id - 1,
+            network: self.network_view(),
         }
     }
 }
@@ -887,6 +942,61 @@ mod tests {
         let usage = e.usage_csv(7);
         assert!(usage.starts_with("day,app,upload_bytes,download_bytes\n"));
         assert!(usage.contains(",/opt/steam/steam,300,4000\n"), "{usage}");
+    }
+
+    #[test]
+    fn rules_follow_the_network() {
+        let store = temp_store("network");
+        let dir = store.dir().to_path_buf();
+        let mut e = Engine::new(store, 10).unwrap();
+        e.add_rule(
+            serde_json::from_str(
+                r#"{"match":{"app":"steam"},"action":{"type":"block"},"network":{"metered":true}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let home = Detected { name: Some("Home".into()), metered: Some(false) };
+        let hotspot = Detected { name: Some("Pixel".into()), metered: Some(true) };
+        let changes = |e: &Engine| {
+            e.events_since(0)
+                .into_iter()
+                .filter_map(|ev| match ev.kind {
+                    EventKind::NetworkChanged { name, metered, rules } => {
+                        Some((name.unwrap(), metered, rules))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        e.set_network("test", home.clone());
+        e.ingest(snap(0, 0, 0), at(12));
+        assert!(!e.apps()[0].blocked);
+        assert_eq!(e.apps()[0].block_rule, None, "network rules are not one-click toggles");
+        assert!(changes(&e).is_empty(), "the first detection is not a change");
+
+        e.set_network("test", hotspot.clone());
+        e.ingest(snap(1000, 0, 0), at(12));
+        assert!(e.apps()[0].blocked, "on the hotspot the rule applies");
+        assert_eq!(changes(&e), vec![("Pixel".to_string(), true, 1)]);
+        e.set_network("test", hotspot.clone());
+        assert_eq!(changes(&e).len(), 1, "no event without a change");
+
+        // The user says this hotspot is unlimited.
+        e.set_metered(Some(false)).unwrap();
+        assert_eq!(e.policy().rules.enabled().count(), 0);
+        let view = e.network_view();
+        assert_eq!((view.metered, view.detected, view.overridden), (false, Some(true), Some(false)));
+        assert_eq!(changes(&e).last(), Some(&("Pixel".to_string(), false, 0)));
+
+        // Remembered per network, across restarts.
+        let mut e = Engine::new(Store::open(dir).unwrap(), 10).unwrap();
+        e.set_network("test", hotspot);
+        assert!(!e.network_view().metered);
+        e.set_network("test", Detected { name: Some("Cafe".into()), metered: Some(true) });
+        assert!(e.network_view().metered, "other networks follow detection");
+        assert_eq!(e.overview().network.name.as_deref(), Some("Cafe"));
     }
 
     #[test]

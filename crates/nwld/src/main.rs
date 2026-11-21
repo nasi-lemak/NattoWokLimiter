@@ -9,6 +9,7 @@ use anyhow::{bail, Context};
 use api::{AppState, Wake};
 use clap::Parser;
 use engine::Engine;
+use nwl_platform::network::NetworkProbe;
 use nwl_platform::{Enforcer, EnforcerOptions, Monitor, NullEnforcer};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -126,6 +127,17 @@ fn run_engine(
     }
 }
 
+/// Polls which network the machine is on. A thread of its own: detection
+/// talks to D-Bus or WinRT and must not delay traffic sampling. Changes take
+/// effect at the next tick.
+fn watch_network(engine: &Mutex<Engine>, mut probe: Box<dyn NetworkProbe>) {
+    loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let detected = probe.detect();
+        engine.lock().unwrap_or_else(|p| p.into_inner()).set_network(probe.name(), detected);
+    }
+}
+
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
@@ -176,7 +188,19 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("{w}");
         engine.add_startup_warning(w);
     }
-    tracing::info!(monitor = monitor.name(), enforcer = enforcer.name(), state = %state_dir.display(), "starting");
+    let mut network: Box<dyn NetworkProbe> = if args.demo {
+        Box::new(nwl_platform::network::FixedNetwork::demo())
+    } else {
+        nwl_platform::network::native_network_probe()
+    };
+    engine.set_network(network.name(), network.detect());
+    tracing::info!(
+        monitor = monitor.name(),
+        enforcer = enforcer.name(),
+        network = network.name(),
+        state = %state_dir.display(),
+        "starting"
+    );
 
     let engine = Arc::new(Mutex::new(engine));
     let (updates, _) = broadcast::channel(16);
@@ -188,6 +212,11 @@ async fn main() -> anyhow::Result<()> {
             .name("engine".into())
             .spawn(move || run_engine(engine, monitor, enforcer, updates, wake_rx, interval))?
     };
+
+    {
+        let engine = engine.clone();
+        std::thread::Builder::new().name("network".into()).spawn(move || watch_network(&engine, network))?;
+    }
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let state =
