@@ -91,7 +91,7 @@ fn describe(exe: &Path) -> Option<String> {
         let mut langs: Vec<(u16, u16)> = Vec::new();
         if let Some((ptr, len)) = query("\\VarFileInfo\\Translation") {
             let pairs = std::slice::from_raw_parts(ptr as *const u16, len as usize / 2);
-            langs.extend(pairs.chunks_exact(2).map(|p| (p[0], p[1])));
+            langs.extend(pairs.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])));
         }
         langs.extend([(0x0409, 0x04b0), (0x0409, 0x04e4)]);
         for key in ["FileDescription", "ProductName"] {
@@ -148,13 +148,13 @@ unsafe fn icon_rgba(icon: HICON) -> Option<(u32, u32, Vec<u8>)> {
         }
         let mut pixels = read_bits(info.hbmColor, w, h)?;
         // Icons without an alpha channel: transparency from the mask.
-        if pixels.chunks_exact(4).all(|p| p[3] == 0) {
+        if pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
             let mask = read_bits(info.hbmMask, w, h)?;
-            for (p, m) in pixels.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+            for (p, m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(mask.as_chunks::<4>().0) {
                 p[3] = if m[0] == 0 { 255 } else { 0 };
             }
         }
-        for p in pixels.chunks_exact_mut(4) {
+        for p in pixels.as_chunks_mut::<4>().0 {
             p.swap(0, 2); // BGRA -> RGBA
         }
         Some((w as u32, h as u32, pixels))
@@ -215,7 +215,7 @@ mod tests {
         let (w, h, rgba) = extract_icon(&explorer.join("explorer.exe")).expect("explorer.exe has an icon");
         assert!(w >= 16 && h >= 16);
         assert_eq!(rgba.len(), (w * h * 4) as usize);
-        assert!(rgba.chunks_exact(4).any(|p| p[3] > 0), "not fully transparent");
+        assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0), "not fully transparent");
         let png = encode_png(w, h, &rgba).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
 

@@ -315,7 +315,7 @@ mod backend {
     /// ksni wants ARGB32 in network byte order.
     fn argb(size: u32, state: &TrayState) -> ksni::Icon {
         let mut data = render_icon(size, state);
-        for px in data.chunks_exact_mut(4) {
+        for px in data.as_chunks_mut::<4>().0 {
             px.rotate_right(1); // RGBA -> ARGB
         }
         ksni::Icon { width: size as i32, height: size as i32, data }
