@@ -24,6 +24,7 @@ pub struct Settings {
     pub quota_exhausted: bool,
     pub enforcement: bool,
     pub network: bool,
+    pub program_changed: bool,
 }
 
 impl Default for Settings {
@@ -36,6 +37,7 @@ impl Default for Settings {
             quota_exhausted: true,
             enforcement: true,
             network: true,
+            program_changed: true,
         }
     }
 }
@@ -90,6 +92,7 @@ impl Settings {
                 EventKind::NetworkChanged { .. } => self.network,
                 EventKind::Imported { .. } => false,
                 EventKind::AskNewApp { .. } => self.new_app,
+                EventKind::ProgramChanged { .. } => self.program_changed,
                 // The user made these changes themselves.
                 EventKind::RuleAdded { .. }
                 | EventKind::RuleChanged { .. }
@@ -139,6 +142,10 @@ pub fn text(kind: &EventKind) -> Option<(String, String)> {
             ("Rules are applied again".to_string(), "Blocks and limits are active.".to_string())
         }
         EventKind::Imported { .. } => return None,
+        EventKind::ProgramChanged { app, name } => (
+            format!("{name}'s program changed"),
+            format!("Usually an update. If nothing was updated, check {app}."),
+        ),
         EventKind::AskNewApp { app, name } => (
             format!("{name} wants to use the network"),
             format!("It's on hold until you allow or block it ({app})."),

@@ -91,6 +91,12 @@ pub enum EventKind {
         app: AppId,
         name: String,
     },
+    /// An app's program file changed: usually an update, possibly a
+    /// replaced binary.
+    ProgramChanged {
+        app: AppId,
+        name: String,
+    },
     /// Rules were restored from a backup.
     Imported {
         /// Rules added (merge) or now in place (replace).
@@ -140,6 +146,13 @@ pub struct AppView {
     /// Held until the user answers whether it may use the network.
     #[serde(default)]
     pub waiting: bool,
+    /// SHA-256 of its program file, once computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// When that program first appeared (unix seconds): changes when the
+    /// program is updated or replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_since: Option<i64>,
     pub pids: Vec<u32>,
     pub connections: usize,
     pub rate_up: u64,

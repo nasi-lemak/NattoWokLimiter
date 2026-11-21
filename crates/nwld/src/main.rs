@@ -2,6 +2,7 @@
 
 mod api;
 mod engine;
+mod identity;
 mod resolver;
 mod store;
 
@@ -181,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
     // Friendly names and icons. Also in the demo: its apps get the real
     // icons of the same apps installed here.
     engine.set_catalog(nwl_platform::appinfo::native_catalog());
+    engine.enable_fingerprints();
     if !args.no_resolve {
         let lookup = if args.demo { nwl_platform::sim::demo_hostname } else { resolver::system_lookup };
         engine.set_resolver(resolver::Resolver::new(4, lookup));

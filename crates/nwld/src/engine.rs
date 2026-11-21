@@ -2,6 +2,7 @@
 //! history and events, and produces the policy the enforcer applies.
 //! Free of I/O except through [`Store`], so it is tested with simulated data.
 
+use crate::identity::{Fingerprint, Hasher};
 use crate::resolver::Resolver;
 use crate::store::{KnownApps, Store, UsageDb};
 use chrono::{DateTime, Datelike, Local, Timelike};
@@ -29,6 +30,9 @@ const HISTORY: &str = "history.json";
 const KNOWN_APPS: &str = "known_apps.json";
 const NETWORK: &str = "network.json";
 const SETTINGS: &str = "settings.json";
+const IDENTITIES: &str = "identities.json";
+/// How often an active app's program file is checked for changes.
+const IDENTITY_CHECK_SECS: i64 = 60;
 /// Ids of the temporary rules that hold apps waiting for an answer, far
 /// above any user rule's.
 const WAITING_RULE_BASE: RuleId = 1 << 48;
@@ -63,6 +67,10 @@ pub struct Engine {
     pending: Vec<Prompt>,
     /// Apps allowed "this time": not asked again until nwld restarts.
     allowed_once: std::collections::HashSet<AppId>,
+    /// Program fingerprints per app, and when each app was last checked.
+    identities: BTreeMap<AppId, Fingerprint>,
+    hasher: Option<Hasher>,
+    identity_checked: HashMap<AppId, i64>,
     /// Quota rule -> period in which its 80% warning was raised.
     warned: HashMap<RuleId, String>,
     /// Whether quota states have been taken in since startup. The first
@@ -150,6 +158,9 @@ impl Engine {
             settings: store.load(SETTINGS)?.unwrap_or_default(),
             pending: Vec::new(),
             allowed_once: Default::default(),
+            identities: store.load(IDENTITIES)?.unwrap_or_default(),
+            hasher: None,
+            identity_checked: HashMap::new(),
             warned: HashMap::new(),
             quotas_primed: false,
             rules,
@@ -181,6 +192,43 @@ impl Engine {
     pub fn add_startup_warning(&mut self, warning: String) {
         self.status.warnings.push(warning.clone());
         self.startup_warnings.push(warning);
+    }
+
+    /// Starts fingerprinting app programs (a worker thread).
+    pub fn enable_fingerprints(&mut self) {
+        let known =
+            self.identities.iter().map(|(app, fp)| (std::path::PathBuf::from(&app.0), fp.clone())).collect();
+        self.hasher = Some(Hasher::new(known));
+    }
+
+    /// A program file's fingerprint was computed.
+    fn fingerprint_ready(&mut self, app: AppId, fp: Fingerprint) {
+        match self.identities.get(&app) {
+            Some(old) if old.sha256 == fp.sha256 => return,
+            Some(_) => {
+                let name = self.app_name(&app);
+                self.push_event(EventKind::ProgramChanged { app: app.clone(), name });
+            }
+            None => {}
+        }
+        self.identities.insert(app, fp);
+        self.dirty = true;
+    }
+
+    fn check_identities(&mut self, now: i64) {
+        let Some(hasher) = &self.hasher else { return };
+        for (path, fp) in hasher.results() {
+            self.fingerprint_ready(AppId(path.display().to_string()), fp);
+        }
+        let Some(hasher) = &self.hasher else { return };
+        for a in self.accountant.apps() {
+            let path = std::path::Path::new(&a.app.0);
+            let due = self.identity_checked.get(&a.app).map_or(true, |t| now - t >= IDENTITY_CHECK_SECS);
+            if path.is_absolute() && due {
+                hasher.check(path.to_path_buf());
+                self.identity_checked.insert(a.app.clone(), now);
+            }
+        }
     }
 
     pub fn set_catalog(&mut self, catalog: Box<dyn AppCatalog>) {
@@ -499,6 +547,7 @@ impl Engine {
             });
         }
 
+        self.check_identities(now.timestamp());
         self.refresh_exhausted();
         self.quotas_primed = true;
         self.snapshot = snap;
@@ -571,6 +620,7 @@ impl Engine {
         self.store.save(USAGE, &self.usage)?;
         self.store.save(HISTORY, &self.history)?;
         self.store.save(KNOWN_APPS, &self.known_apps)?;
+        self.store.save(IDENTITIES, &self.identities)?;
         self.dirty = false;
         Ok(())
     }
@@ -679,6 +729,8 @@ impl Engine {
                     name: info.map_or_else(|| s.name.clone(), |i| i.name.clone()),
                     icon: info.is_some_and(|i| i.icon.is_some()),
                     waiting,
+                    sha256: self.identities.get(&s.app).map(|f| f.sha256.clone()),
+                    program_since: self.identities.get(&s.app).map(|f| f.since),
                     pids: s.pids.iter().copied().collect(),
                     connections: s.connections,
                     rate_up: s.rate_up,
@@ -1351,6 +1403,23 @@ mod tests {
         e.ingest(snap(0, 0, 0), at(12));
         e.set_settings(DaemonSettings { ask_new_apps: false }).unwrap();
         assert!(e.prompts().is_empty() && e.policy().rules.enabled().count() == 0);
+    }
+
+    #[test]
+    fn changed_programs_are_reported() {
+        let mut e = Engine::new(temp_store("identity"), 10).unwrap();
+        let steam = AppId("/opt/steam/steam".into());
+        let fp = |sha: &str| Fingerprint { sha256: sha.into(), size: 1, modified: 1, since: 1 };
+        e.fingerprint_ready(steam.clone(), fp("aaa"));
+        e.fingerprint_ready(steam.clone(), fp("aaa"));
+        let changes = |e: &Engine| {
+            e.events_since(0).iter().filter(|ev| matches!(ev.kind, EventKind::ProgramChanged { .. })).count()
+        };
+        assert_eq!(changes(&e), 0, "first sight and unchanged programs aren't news");
+        e.fingerprint_ready(steam.clone(), fp("bbb"));
+        assert_eq!(changes(&e), 1);
+        e.ingest(snap(0, 0, 0), at(12));
+        assert_eq!(e.apps()[0].sha256.as_deref(), Some("bbb"));
     }
 
     #[test]

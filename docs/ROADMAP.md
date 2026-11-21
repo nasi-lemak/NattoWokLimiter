@@ -42,8 +42,9 @@ trade-offs stay visible.
   and hourly points for 90 days, CSV export). Next: history per remote host, and longer retention.
 - **ASN and country for remote hosts.** "Who is this app talking to?" is done (hosts per app with
   bytes, ports and protocols). Next: ASN and country, and keeping it across restarts.
-- **Binary identity.** Hash and code-signature checks so a rule for `firefox` doesn't follow a
-  replaced binary.
+- **Binary identity.** Program fingerprints are done (SHA-256 per app, an alert when a program
+  changes). Next: rules pinned to a fingerprint, and package-manager / code-signature checks to tell an
+  update from a replacement.
 
 ## Product
 

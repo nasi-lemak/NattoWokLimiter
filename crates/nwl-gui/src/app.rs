@@ -855,14 +855,32 @@ impl NwlApp {
             let _ = self.poller.send(Request::Remotes(self.expanded.clone()));
         }
         if let Some(app) = self.expanded.clone() {
+            let view = lock(&self.data).apps().iter().find(|a| a.app == app).cloned();
+            let name = view.as_ref().map_or_else(|| app.display_name().to_string(), |v| v.name.clone());
             ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
-                ui.strong(format!("{} talks to", app.display_name()));
+                ui.strong(format!("{name} talks to"));
                 if ui.small_button("×").on_hover_text("Close").clicked() {
                     self.expanded = None;
                 }
             });
+            // Its program's fingerprint: changes when it is updated or replaced.
+            if let Some(sha) = view.as_ref().and_then(|v| v.sha256.clone()) {
+                ui.horizontal(|ui| {
+                    ui.weak("Program SHA-256");
+                    ui.monospace(RichText::new(&sha[..16.min(sha.len())]).small()).on_hover_text(&sha);
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(sha.clone());
+                    }
+                    if let Some(since) = view.as_ref().and_then(|v| v.program_since) {
+                        let when = chrono::DateTime::from_timestamp(since, 0)
+                            .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+                            .unwrap_or_default();
+                        ui.weak(format!("since {when}"));
+                    }
+                });
+            }
             remotes_table(ui, &remotes);
             ui.add_space(8.0);
             ui.strong("Open connections");
@@ -905,6 +923,10 @@ impl NwlApp {
                         ui.checkbox(
                             &mut settings.network,
                             "You join a metered network, or network rules switch",
+                        );
+                        ui.checkbox(
+                            &mut settings.program_changed,
+                            "An app's program changes (updated or replaced)",
                         );
                     });
                 });
@@ -1960,6 +1982,9 @@ impl NwlApp {
                         EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(col_ok())),
                         EventKind::Paused => ("All rules paused".into(), Some(col_accent())),
                         EventKind::Resumed => ("All rules resumed".into(), Some(col_ok())),
+                        EventKind::ProgramChanged { name, app } => {
+                            (format!("{name}'s program changed ({app}): updated or replaced"), Some(col_accent()))
+                        }
                         EventKind::AskNewApp { name, .. } => {
                             (format!("{name} wanted to use the network; held until answered"), Some(col_accent()))
                         }
