@@ -40,8 +40,9 @@ impl Default for Settings {
     }
 }
 
-fn config_path() -> Option<PathBuf> {
-    let base = if cfg!(windows) {
+/// Where the desktop app keeps its settings.
+pub fn config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
         std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("NattoWokLimiter"))
     } else if cfg!(target_os = "macos") {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/NattoWokLimiter"))
@@ -50,8 +51,11 @@ fn config_path() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
             .map(|c| c.join("nattowok"))
-    };
-    base.map(|b| b.join("desktop.json"))
+    }
+}
+
+fn config_path() -> Option<PathBuf> {
+    config_dir().map(|b| b.join("desktop.json"))
 }
 
 impl Settings {

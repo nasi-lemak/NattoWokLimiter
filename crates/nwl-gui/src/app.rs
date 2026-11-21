@@ -16,11 +16,25 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 use web_time::Instant;
 
-const DOWN: Color32 = Color32::from_rgb(59, 130, 246);
-const UP: Color32 = Color32::from_rgb(236, 72, 153);
-const ACCENT: Color32 = Color32::from_rgb(217, 119, 6);
-const BAD: Color32 = Color32::from_rgb(220, 38, 38);
-const OK: Color32 = Color32::from_rgb(22, 163, 74);
+// Colors of the current theme (see `crate::theme`).
+fn col_down() -> Color32 {
+    crate::theme::current().down
+}
+fn col_up() -> Color32 {
+    crate::theme::current().up
+}
+fn col_accent() -> Color32 {
+    crate::theme::current().accent
+}
+fn col_bad() -> Color32 {
+    crate::theme::current().bad
+}
+fn col_ok() -> Color32 {
+    crate::theme::current().ok
+}
+fn col_on_accent() -> Color32 {
+    crate::theme::current().on_accent
+}
 
 fn rate(n: u64) -> String {
     if n == 0 {
@@ -205,6 +219,9 @@ pub struct NwlApp {
     usage_days: usize,
     show_notify_settings: bool,
     show_about: bool,
+    /// The chosen theme (`"system"` or a theme id), and the palette applied.
+    theme: String,
+    applied_theme: &'static str,
     history_range: Range,
     /// App the History tab is filtered to; `None` for all traffic.
     history_app: Option<AppId>,
@@ -249,6 +266,8 @@ impl NwlApp {
             usage_days: 30,
             show_notify_settings: false,
             show_about: false,
+            theme: crate::theme::load(),
+            applied_theme: "",
             history_range: Range::Day,
             history_app: None,
             tray: {
@@ -280,37 +299,36 @@ impl NwlApp {
         let d = lock(&self.data);
         let mut toggle_pause: Option<bool> = None;
         let mut set_metered: Option<(Option<bool>, String)> = None;
+        let mut new_theme: Option<String> = None;
         ui.horizontal(|ui| {
             let (logo, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-            ui.painter().circle_filled(logo.center(), 11.0, ACCENT);
+            ui.painter().circle_filled(logo.center(), 11.0, col_accent());
             let chevron = [
                 logo.center() + egui::vec2(-5.0, 3.0),
                 logo.center() + egui::vec2(0.0, -3.0),
                 logo.center() + egui::vec2(5.0, 3.0),
             ];
-            ui.painter().add(egui::Shape::line(chevron.to_vec(), Stroke::new(2.5, Color32::WHITE)));
+            ui.painter().add(egui::Shape::line(chevron.to_vec(), Stroke::new(2.5, col_on_accent())));
             ui.label(RichText::new("NattoWok Limiter").strong().size(18.0));
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             let (text, color) = match (&d.status, d.connected) {
-                (_, false) => ("Disconnected".to_string(), BAD),
+                (_, false) => ("Disconnected".to_string(), col_bad()),
                 (Some(s), true) => {
                     let e = &s.enforcement;
                     let demo = if e.monitor.starts_with("simulated") { "Demo · " } else { "" };
                     if e.error.is_some() {
-                        (format!("{demo}Enforcement error"), BAD)
+                        (format!("{demo}Enforcement error"), col_bad())
                     } else if e.paused {
-                        (format!("{demo}Paused: nothing is blocked or limited"), ACCENT)
+                        (format!("{demo}Paused: nothing is blocked or limited"), col_accent())
                     } else if !e.enforcing {
-                        (format!("{demo}Monitor only"), ACCENT)
+                        (format!("{demo}Monitor only"), col_accent())
                     } else {
-                        (format!("{demo}Enforcing"), OK)
+                        (format!("{demo}Enforcing"), col_ok())
                     }
                 }
-                (None, true) => ("Connecting…".to_string(), ACCENT),
+                (None, true) => ("Connecting…".to_string(), col_accent()),
             };
-            let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-            ui.painter().circle_filled(dot.center(), 4.0, color);
-            ui.label(RichText::new(text).color(color).strong());
+            crate::theme::pill(ui, text, color, true);
             if let Some(s) = d.status.as_ref().filter(|s| d.connected && s.enforcement.enforcing) {
                 let paused = s.enforcement.paused;
                 let (label, hint) = if paused {
@@ -334,22 +352,27 @@ impl NwlApp {
                 {
                     self.show_notify_settings = !self.show_notify_settings;
                 }
-                // Follows the system theme until toggled.
-                let dark = ui.visuals().dark_mode;
-                if ui.button(if dark { "☀" } else { "🌙" }).on_hover_text("Toggle theme").clicked() {
-                    ui.ctx().set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
+                if let Some(choice) = theme_menu(ui, &self.theme) {
+                    new_theme = Some(choice);
                 }
+                ui.add_space(6.0);
                 if let Some(o) = &d.overview {
                     let s = &o.system;
                     total(ui, "SESSION", format_bytes(s.total_up + s.total_down), ui.visuals().text_color());
-                    total(ui, "UPLOAD", rate(s.rate_up), UP);
-                    total(ui, "DOWNLOAD", rate(s.rate_down), DOWN);
+                    total(ui, "↑ UPLOAD", rate(s.rate_up), col_up());
+                    total(ui, "↓ DOWNLOAD", rate(s.rate_down), col_down());
                 }
             });
         });
         drop(d);
         if let Some(paused) = toggle_pause {
             self.set_paused(paused);
+        }
+        if let Some(choice) = new_theme {
+            if let Err(e) = crate::theme::save(&choice) {
+                lock(&self.data).toast = Some((e, false, Instant::now()));
+            }
+            self.theme = choice;
         }
         if let Some((metered, name)) = set_metered {
             let done = match metered {
@@ -369,6 +392,8 @@ impl NwlApp {
         };
         Plot::new("system")
             .height(150.0)
+            .show_background(false)
+            .show_grid([false, true])
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
@@ -385,9 +410,30 @@ impl NwlApp {
                 _ => None,
             })
             .show(ui, |p| {
-                p.line(Line::new("Download", points(|s| s.1)).color(DOWN).fill(0.0).width(1.6));
-                p.line(Line::new("Upload", points(|s| s.0)).color(UP).fill(0.0).width(1.6));
+                p.line(Line::new("Download", points(|s| s.1)).color(col_down()).fill(0.0).width(1.6));
+                p.line(Line::new("Upload", points(|s| s.0)).color(col_up()).fill(0.0).width(1.6));
             });
+    }
+
+    /// The open tab's content.
+    fn tab_content(&mut self, ui: &mut Ui) {
+        match self.tab {
+            Tab::Apps => {
+                egui::ScrollArea::vertical().id_salt("apps-scroll").show(ui, |ui| self.apps_tab(ui)).inner
+            }
+            Tab::Connections => self.connections_tab(ui),
+            Tab::Rules => self.rules_tab(ui),
+            Tab::History => {
+                egui::ScrollArea::vertical()
+                    .id_salt("history-scroll")
+                    .show(ui, |ui| self.history_tab(ui))
+                    .inner
+            }
+            Tab::Usage => {
+                egui::ScrollArea::vertical().id_salt("usage-scroll").show(ui, |ui| self.usage_tab(ui)).inner
+            }
+            Tab::Events => self.events_tab(ui),
+        }
     }
 
     fn tabs(&mut self, ui: &mut Ui) {
@@ -405,14 +451,40 @@ impl NwlApp {
             (Tab::Events, "Events", d.events.len()),
         ];
         drop(d);
-        ui.horizontal(|ui| {
-            for (tab, label, count) in counts {
-                let text = if count > 0 { format!("{label} {count}") } else { label.to_string() };
-                if ui.selectable_label(self.tab == tab, RichText::new(text).strong()).clicked() {
-                    self.tab = tab;
-                }
-            }
-        });
+        // A segmented control: the open tab is an accent-colored pill.
+        let p = crate::theme::current();
+        egui::Frame::new().fill(p.surface).corner_radius(10).inner_margin(egui::Margin::same(3)).show(
+            ui,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (tab, label, count) in counts {
+                        let selected = self.tab == tab;
+                        let fg = if selected { p.on_accent } else { p.text };
+                        let mut job = egui::text::LayoutJob::default();
+                        let format = |size: f32, color: Color32| egui::TextFormat {
+                            font_id: egui::FontId::proportional(size),
+                            color,
+                            valign: egui::Align::Center,
+                            ..Default::default()
+                        };
+                        job.append(label, 0.0, format(14.0, fg));
+                        if count > 0 {
+                            let weak = if selected { p.on_accent.gamma_multiply(0.75) } else { p.weak };
+                            job.append(&count.to_string(), 7.0, format(12.0, weak));
+                        }
+                        let button = egui::Button::new(job)
+                            .fill(if selected { p.accent } else { Color32::TRANSPARENT })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(8)
+                            .min_size(egui::vec2(0.0, 28.0));
+                        if ui.add(button).clicked() {
+                            self.tab = tab;
+                        }
+                    }
+                });
+            },
+        );
     }
 
     fn apps_tab(&mut self, ui: &mut Ui) {
@@ -481,20 +553,20 @@ impl NwlApp {
             })
             .body(|mut body| {
                 for (i, a) in apps.iter().enumerate() {
-                    body.row(38.0, |mut row| {
+                    body.row(46.0, |mut row| {
                         row.col(|ui| {
                             let tag = quotas.iter().find(|q| a.rules.contains(&q.rule)).map(|q| {
-                                let color = if q.exhausted { BAD } else { ACCENT };
+                                let color = if q.exhausted { col_bad() } else { col_accent() };
                                 (format!("{} / {}", format_bytes(q.used), format_bytes(q.limit)), color)
                             });
                             app_cell(ui, &a.name, &a.app.0, a.blocked, tag);
                         });
                         row.col(|ui| sparkline(ui, &histories[i]));
                         row.col(|ui| {
-                            ui.label(RichText::new(rate(a.rate_down)).color(DOWN).monospace());
+                            ui.label(RichText::new(rate(a.rate_down)).color(col_down()).monospace());
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(rate(a.rate_up)).color(UP).monospace());
+                            ui.label(RichText::new(rate(a.rate_up)).color(col_up()).monospace());
                         });
                         row.col(|ui| {
                             ui.label(RichText::new(format_bytes(a.total_up + a.total_down)).monospace());
@@ -512,7 +584,7 @@ impl NwlApp {
                                 None => "Limit…".into(),
                             };
                             let limit_btn = egui::Button::new(if limit_rules[i].is_some() {
-                                RichText::new(limit_text).color(ACCENT)
+                                RichText::new(limit_text).color(col_accent())
                             } else {
                                 RichText::new(limit_text)
                             });
@@ -520,7 +592,10 @@ impl NwlApp {
                                 clicked = Some((i, "limit"));
                             }
                             let block = if a.block_rule.is_some() {
-                                egui::Button::new(RichText::new("Blocked").color(Color32::WHITE)).fill(BAD)
+                                egui::Button::new(
+                                    RichText::new("Blocked").color(crate::theme::current().bg).strong(),
+                                )
+                                .fill(col_bad())
                             } else {
                                 egui::Button::new("Block")
                             };
@@ -641,7 +716,7 @@ impl NwlApp {
                 ui.add_space(4.0);
                 ui.weak("Only events from now on; past events stay in the Events tab.");
                 if let Some(e) = &error {
-                    ui.colored_label(BAD, format!("Notification service: {e}"));
+                    ui.colored_label(col_bad(), format!("Notification service: {e}"));
                 }
                 if ui.button("Send a test notification").clicked() {
                     test = true;
@@ -720,7 +795,7 @@ impl NwlApp {
                 });
                 ui.weak("e.g. 500kB/s, 2MB/s, 10Mbit. Empty means no limit.");
                 if let Some(e) = &dialog.error {
-                    ui.colored_label(BAD, e);
+                    ui.colored_label(col_bad(), e);
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Apply").clicked() {
@@ -832,7 +907,7 @@ impl NwlApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if self.form.open { "Close form" } else { "New rule" };
                 if ui
-                    .add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(ACCENT))
+                    .add(egui::Button::new(RichText::new(label).color(col_on_accent())).fill(col_accent()))
                     .clicked()
                 {
                     self.form = RuleForm { open: !self.form.open, ..RuleForm::default() };
@@ -883,7 +958,7 @@ impl NwlApp {
                                 ui.add(
                                     egui::ProgressBar::new(frac)
                                         .desired_width(320.0)
-                                        .fill(if q.exhausted { BAD } else { ACCENT })
+                                        .fill(if q.exhausted { col_bad() } else { col_accent() })
                                         .text(text),
                                 );
                             }
@@ -1040,10 +1115,10 @@ impl NwlApp {
                  data, or any network you mark as metered.",
             );
             if let Some(e) = &f.error {
-                ui.colored_label(BAD, e);
+                ui.colored_label(col_bad(), e);
             }
             save = ui
-                .add(egui::Button::new(RichText::new("Save rule").color(Color32::WHITE)).fill(ACCENT))
+                .add(egui::Button::new(RichText::new("Save rule").color(col_on_accent())).fill(col_accent()))
                 .clicked();
         });
         if save {
@@ -1110,9 +1185,11 @@ impl NwlApp {
             days.iter().enumerate().map(|(i, d)| Bar::new(i as f64, d.1 as f64).width(0.7)).collect();
         let up_bars: Vec<Bar> =
             days.iter().enumerate().map(|(i, d)| Bar::new(i as f64, d.2 as f64).width(0.7)).collect();
-        let down = BarChart::new("Download", down_bars).color(DOWN);
-        let up = BarChart::new("Upload", up_bars).color(UP).stack_on(&[&down]);
+        let down = BarChart::new("Download", down_bars).color(col_down());
+        let up = BarChart::new("Upload", up_bars).color(col_up()).stack_on(&[&down]);
         Plot::new("usage")
+            .show_background(false)
+            .show_grid([false, true])
             .height(190.0)
             .allow_drag(false)
             .allow_zoom(false)
@@ -1153,7 +1230,7 @@ impl NwlApp {
             })
             .body(|mut body| {
                 for (app, name, down, up) in rows.iter().take(200) {
-                    body.row(36.0, |mut row| {
+                    body.row(44.0, |mut row| {
                         row.col(|ui| app_cell(ui, name, app, false, None));
                         row.col(|ui| {
                             ui.monospace(format_bytes(*down));
@@ -1168,7 +1245,7 @@ impl NwlApp {
                             ui.add(
                                 egui::ProgressBar::new((down + up) as f32 / grand as f32)
                                     .desired_width(140.0)
-                                    .fill(ACCENT),
+                                    .fill(col_accent()),
                             );
                         });
                     });
@@ -1248,8 +1325,8 @@ impl NwlApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.strong(format!("{}:", self.history_range.label()));
-            ui.label(RichText::new(format!("↓ {}", format_bytes(down))).color(DOWN));
-            ui.label(RichText::new(format!("↑ {}", format_bytes(up))).color(UP));
+            ui.label(RichText::new(format!("↓ {}", format_bytes(down))).color(col_down()));
+            ui.label(RichText::new(format!("↑ {}", format_bytes(up))).color(col_up()));
             ui.weak(format!("· one point per {}", step_label(view.step_secs)));
         });
         let step = view.step_secs;
@@ -1257,6 +1334,8 @@ impl NwlApp {
             view.points.iter().map(|p| [p.t as f64, pick(p) as f64]).collect()
         };
         Plot::new("history")
+            .show_background(false)
+            .show_grid([false, true])
             .height(220.0)
             .allow_drag(false)
             .allow_zoom(false)
@@ -1273,8 +1352,8 @@ impl NwlApp {
                 _ => None,
             })
             .show(ui, |p| {
-                p.line(Line::new("Download", to_points(|p| p.down)).color(DOWN).fill(0.0).width(1.6));
-                p.line(Line::new("Upload", to_points(|p| p.up)).color(UP).fill(0.0).width(1.6));
+                p.line(Line::new("Download", to_points(|p| p.down)).color(col_down()).fill(0.0).width(1.6));
+                p.line(Line::new("Upload", to_points(|p| p.up)).color(col_up()).fill(0.0).width(1.6));
             });
         if self.history_app.is_some() || view.apps.is_empty() {
             return;
@@ -1302,7 +1381,7 @@ impl NwlApp {
             })
             .body(|mut body| {
                 for a in view.apps.iter().take(50) {
-                    body.row(36.0, |mut row| {
+                    body.row(44.0, |mut row| {
                         row.col(|ui| app_cell(ui, &a.name, &a.app.0, false, None));
                         row.col(|ui| {
                             ui.monospace(format_bytes(a.down));
@@ -1315,7 +1394,7 @@ impl NwlApp {
                         });
                         row.col(|ui| {
                             let share = (a.down + a.up) as f32 / grand as f32;
-                            ui.add(egui::ProgressBar::new(share).desired_width(140.0).fill(ACCENT));
+                            ui.add(egui::ProgressBar::new(share).desired_width(140.0).fill(col_accent()));
                         });
                         if row.response().clicked() {
                             pick = Some(a.app.clone());
@@ -1379,23 +1458,23 @@ impl NwlApp {
                     ui.weak(local_time(e.time));
                     let (text, color) = match &e.kind {
                         EventKind::NewApp { app, name } => (format!("{name} used the network for the first time ({app})"), None),
-                        EventKind::QuotaWarning { rule, name, percent } => (format!("Rule #{rule} {name} has used {percent}% of its quota"), Some(ACCENT)),
-                        EventKind::QuotaExhausted { rule, name } => (format!("Quota reached for rule #{rule} {name}: traffic blocked until the period resets"), Some(BAD)),
+                        EventKind::QuotaWarning { rule, name, percent } => (format!("Rule #{rule} {name} has used {percent}% of its quota"), Some(col_accent())),
+                        EventKind::QuotaExhausted { rule, name } => (format!("Quota reached for rule #{rule} {name}: traffic blocked until the period resets"), Some(col_bad())),
                         EventKind::RuleAdded { rule, name } => (format!("Rule #{rule} added {name}"), None),
                         EventKind::RuleChanged { rule, name } => (format!("Rule #{rule} changed {name}"), None),
                         EventKind::RuleRemoved { rule, name } => (format!("Rule #{rule} removed {name}"), None),
-                        EventKind::EnforcementError { message } => (format!("Enforcement error: {message}"), Some(BAD)),
-                        EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(OK)),
-                        EventKind::Paused => ("All rules paused".into(), Some(ACCENT)),
-                        EventKind::Resumed => ("All rules resumed".into(), Some(OK)),
+                        EventKind::EnforcementError { message } => (format!("Enforcement error: {message}"), Some(col_bad())),
+                        EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(col_ok())),
+                        EventKind::Paused => ("All rules paused".into(), Some(col_accent())),
+                        EventKind::Resumed => ("All rules resumed".into(), Some(col_ok())),
                         EventKind::NetworkChanged { name, metered, rules } => {
                             let kind = if *metered { "metered" } else { "unmetered" };
                             let name = name.as_deref().map_or(String::new(), |n| format!(" {n}"));
-                            (format!("Now on {kind} network{name}: {rules} network rule(s) apply"), metered.then_some(ACCENT))
+                            (format!("Now on {kind} network{name}: {rules} network rule(s) apply"), metered.then_some(col_accent()))
                         }
                         EventKind::TrafficSpike { .. } => {
                             let (title, body) = crate::notify::text(&e.kind).unwrap_or_default();
-                            (format!("{title}. {body}"), Some(ACCENT))
+                            (format!("{title}. {body}"), Some(col_accent()))
                         }
                     };
                     match color {
@@ -1429,14 +1508,14 @@ impl NwlApp {
         });
         if let Some(s) = &d.status {
             if let Some(e) = &s.enforcement.error {
-                ui.colored_label(BAD, format!("Enforcement failed: {e}"));
+                ui.colored_label(col_bad(), format!("Enforcement failed: {e}"));
             }
             for w in &s.enforcement.warnings {
-                ui.colored_label(ACCENT, w);
+                ui.colored_label(col_accent(), w);
             }
         }
         if let Some(e) = &d.error {
-            ui.colored_label(BAD, format!("{e}. Is nwld running? Retrying every second."));
+            ui.colored_label(col_bad(), format!("{e}. Is nwld running? Retrying every second."));
         }
     }
 }
@@ -1494,10 +1573,10 @@ fn local_time(unix_ms: i64) -> String {
 
 /// A labelled figure in the header; laid out right to left.
 fn total(ui: &mut Ui, label: &str, value: String, color: Color32) {
-    ui.allocate_ui_with_layout(egui::vec2(120.0, 40.0), egui::Layout::top_down(egui::Align::Max), |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ui.weak(RichText::new(label).small());
-        ui.label(RichText::new(value).size(17.0).strong().color(color));
+    ui.allocate_ui_with_layout(egui::vec2(124.0, 40.0), egui::Layout::top_down(egui::Align::Max), |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        ui.label(RichText::new(label).small().color(crate::theme::current().weak).strong());
+        ui.label(RichText::new(value).size(18.0).strong().color(color));
     });
 }
 
@@ -1561,8 +1640,8 @@ fn sparkline(ui: &mut Ui, history: &VecDeque<(u64, u64)>) {
     if n >= 2 {
         let down: Vec<_> = history.iter().enumerate().map(|(i, s)| point(i, s.1)).collect();
         let up: Vec<_> = history.iter().enumerate().map(|(i, s)| point(i, s.0)).collect();
-        ui.painter().add(egui::Shape::line(down, Stroke::new(1.4, DOWN)));
-        ui.painter().add(egui::Shape::line(up, Stroke::new(1.2, UP)));
+        ui.painter().add(egui::Shape::line(down, Stroke::new(1.4, col_down())));
+        ui.painter().add(egui::Shape::line(up, Stroke::new(1.2, col_up())));
     }
 }
 
@@ -1583,7 +1662,7 @@ fn remotes_table(ui: &mut Ui, remotes: &[nwl_core::api::RemoteView]) {
         .column(Column::exact(50.0))
         .column(Column::exact(140.0))
         .header(22.0, |mut h| {
-            for t in ["HOST", "DOWN", "UP", "PORTS", "OPEN", "SHARE"] {
+            for t in ["HOST", "col_down()", "col_up()", "PORTS", "OPEN", "SHARE"] {
                 h.col(|ui| {
                     ui.weak(RichText::new(t).small().strong());
                 });
@@ -1607,10 +1686,10 @@ fn remotes_table(ui: &mut Ui, remotes: &[nwl_core::api::RemoteView]) {
                         });
                     });
                     row.col(|ui| {
-                        ui.label(RichText::new(format_bytes(r.down)).color(DOWN).monospace());
+                        ui.label(RichText::new(format_bytes(r.down)).color(col_down()).monospace());
                     });
                     row.col(|ui| {
-                        ui.label(RichText::new(format_bytes(r.up)).color(UP).monospace());
+                        ui.label(RichText::new(format_bytes(r.up)).color(col_up()).monospace());
                     });
                     row.col(|ui| {
                         let protos: Vec<String> = r.protocols.iter().map(|p| p.to_string()).collect();
@@ -1622,7 +1701,7 @@ fn remotes_table(ui: &mut Ui, remotes: &[nwl_core::api::RemoteView]) {
                     });
                     row.col(|ui| {
                         let frac = (r.up + r.down) as f32 / max as f32;
-                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0).fill(ACCENT));
+                        ui.add(egui::ProgressBar::new(frac).desired_width(120.0).fill(col_accent()));
                     });
                 });
             }
@@ -1645,7 +1724,8 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
         .column(Column::exact(65.0))
         .column(Column::exact(130.0).clip(true))
         .header(22.0, |mut h| {
-            let titles: &[&str] = &["PROTO", "LOCAL", "REMOTE", "STATE", "DOWN", "UP", "RTT", "POLICY"];
+            let titles: &[&str] =
+                &["PROTO", "LOCAL", "REMOTE", "STATE", "col_down()", "col_up()", "RTT", "POLICY"];
             if with_app {
                 h.col(|ui| {
                     ui.weak(RichText::new("APP").small().strong());
@@ -1690,10 +1770,10 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
                         ui.label(c.conn.state.map(|s| format!("{s:?}").to_lowercase()).unwrap_or_default());
                     });
                     row.col(|ui| {
-                        ui.label(RichText::new(rate(c.rate_down)).color(DOWN).monospace());
+                        ui.label(RichText::new(rate(c.rate_down)).color(col_down()).monospace());
                     });
                     row.col(|ui| {
-                        ui.label(RichText::new(rate(c.rate_up)).color(UP).monospace());
+                        ui.label(RichText::new(rate(c.rate_up)).color(col_up()).monospace());
                     });
                     row.col(|ui| {
                         ui.label(
@@ -1702,10 +1782,10 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
                     });
                     row.col(|ui| {
                         if c.blocked {
-                            ui.colored_label(BAD, format!("blocked #{}", c.access_rule.unwrap_or(0)));
+                            ui.colored_label(col_bad(), format!("blocked #{}", c.access_rule.unwrap_or(0)));
                         } else if !c.limits.is_empty() {
                             ui.colored_label(
-                                ACCENT,
+                                col_accent(),
                                 format!(
                                     "limited #{}",
                                     c.limits.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
@@ -1848,42 +1928,38 @@ impl eframe::App for NwlApp {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        egui::Panel::top("header").show(ui, |ui| {
-            ui.add_space(6.0);
+        // The chosen theme (or the system's light/dark one), applied on change.
+        let system_dark = ctx.system_theme().map_or(true, |t| t == egui::Theme::Dark);
+        let palette = crate::theme::resolve(&self.theme, system_dark);
+        if palette.id != self.applied_theme {
+            crate::theme::apply(&ctx, &palette);
+            self.applied_theme = palette.id;
+        }
+        let bar = |margin: egui::Margin| {
+            egui::Frame::new()
+                .fill(palette.panel)
+                .stroke(Stroke::new(1.0, palette.border))
+                .inner_margin(margin)
+        };
+        egui::Panel::top("header").frame(bar(egui::Margin::symmetric(16, 10))).show(ui, |ui| {
             self.header(ui);
-            ui.add_space(4.0);
         });
-        egui::Panel::bottom("footer").show(ui, |ui| {
-            ui.add_space(2.0);
+        egui::Panel::bottom("footer").frame(bar(egui::Margin::symmetric(16, 6))).show(ui, |ui| {
             self.footer(ui);
-            ui.add_space(2.0);
         });
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.graph(ui);
-            ui.add_space(6.0);
+        let page = egui::Frame::new().fill(palette.bg).inner_margin(egui::Margin::same(14));
+        egui::CentralPanel::default().frame(page).show(ui, |ui| {
+            crate::theme::card()
+                .inner_margin(egui::Margin { left: 6, right: 12, top: 10, bottom: 6 })
+                .show(ui, |ui| self.graph(ui));
+            ui.add_space(12.0);
             self.tabs(ui);
-            ui.separator();
+            ui.add_space(10.0);
             self.sync_history_query();
-            match self.tab {
-                Tab::Apps => {
-                    egui::ScrollArea::vertical().id_salt("apps-scroll").show(ui, |ui| self.apps_tab(ui)).inner
-                }
-                Tab::Connections => self.connections_tab(ui),
-                Tab::Rules => self.rules_tab(ui),
-                Tab::History => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("history-scroll")
-                        .show(ui, |ui| self.history_tab(ui))
-                        .inner
-                }
-                Tab::Usage => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("usage-scroll")
-                        .show(ui, |ui| self.usage_tab(ui))
-                        .inner
-                }
-                Tab::Events => self.events_tab(ui),
-            }
+            crate::theme::card().show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                self.tab_content(ui);
+            });
         });
         self.limit_window(&ctx);
         self.notify_window(&ctx);
@@ -1895,8 +1971,14 @@ impl eframe::App for NwlApp {
                 egui::Area::new(egui::Id::new("toast"))
                     .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
                     .show(&ctx, |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.colored_label(if ok { OK } else { BAD }, text);
+                        egui::Frame::popup(ui.style()).corner_radius(10).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let color = if ok { col_ok() } else { col_bad() };
+                                let (dot, _) =
+                                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                                ui.painter().circle_filled(dot.center(), 4.0, color);
+                                ui.label(text);
+                            });
                         });
                     });
                 ctx.request_repaint_after(Duration::from_millis(250));
@@ -1917,37 +1999,79 @@ fn metered_label(metered: Option<bool>) -> &'static str {
 /// metered or not. Returns the choice made (`Some(None)`: as detected).
 fn network_menu(ui: &mut Ui, net: &nwl_core::api::NetworkView) -> Option<Option<bool>> {
     let name = net.name.as_deref().unwrap_or("Network");
-    let label = if net.metered {
-        RichText::new(format!("📶 {name} · metered")).color(ACCENT)
+    let p = crate::theme::current();
+    let (text, color) = if net.metered {
+        (format!("📶 {name} · metered"), p.accent)
     } else {
-        RichText::new(format!("📶 {name}"))
+        (format!("📶 {name}"), p.weak)
     };
+    let button = egui::Button::new(RichText::new(text).color(if net.metered { p.accent } else { p.text }))
+        .fill(crate::theme::mix(p.panel, color, if net.metered { 0.16 } else { 0.08 }))
+        .stroke(Stroke::new(1.0, crate::theme::mix(p.panel, color, 0.4)))
+        .corner_radius(12);
     let mut choice = None;
-    ui.menu_button(label, |ui| {
-        ui.label(RichText::new(name).strong());
-        let detected = match net.detected {
-            Some(true) => "metered",
-            Some(false) => "not metered",
-            None => "unknown",
-        };
-        let source = if net.source.is_empty() || net.source == "none" {
-            String::new()
-        } else {
-            format!(" by {}", net.source)
-        };
-        ui.weak(format!("Detected{source}: {detected}"));
-        ui.separator();
-        ui.label("Treat this network as");
-        for (value, text) in [(None, "As detected"), (Some(true), "Metered"), (Some(false), "Not metered")] {
-            if ui.radio(net.overridden == value, text).clicked() {
-                choice = Some(value);
+    egui::containers::menu::MenuButton::from_button(button)
+        .ui(ui, |ui| {
+            ui.label(RichText::new(name).strong());
+            let detected = match net.detected {
+                Some(true) => "metered",
+                Some(false) => "not metered",
+                None => "unknown",
+            };
+            let source = if net.source.is_empty() || net.source == "none" {
+                String::new()
+            } else {
+                format!(" by {}", net.source)
+            };
+            ui.weak(format!("Detected{source}: {detected}"));
+            ui.separator();
+            ui.label("Treat this network as");
+            for (value, text) in
+                [(None, "As detected"), (Some(true), "Metered"), (Some(false), "Not metered")]
+            {
+                if ui.radio(net.overridden == value, text).clicked() {
+                    choice = Some(value);
+                    ui.close();
+                }
+            }
+            ui.add_space(4.0);
+            ui.weak("Rules can apply only on metered networks,\ne.g. a phone hotspot.");
+        })
+        .0
+        .on_hover_text("The network rules see. Click to mark it metered or not.");
+    choice
+}
+
+/// The theme picker in the header. Returns the choice made.
+fn theme_menu(ui: &mut Ui, current: &str) -> Option<String> {
+    let mut choice = None;
+    egui::containers::menu::MenuButton::from_button(egui::Button::new("🎨"))
+        .ui(ui, |ui| {
+            ui.label(RichText::new("Theme").strong());
+            ui.add_space(2.0);
+            let system = crate::theme::SYSTEM;
+            if ui.radio(current == system, "Match the system (light or dark)").clicked() {
+                choice = Some(system.to_string());
                 ui.close();
             }
-        }
-        ui.add_space(4.0);
-        ui.weak("Rules can apply only on metered networks,\ne.g. a phone hotspot.");
-    })
-    .response
-    .on_hover_text("The network rules see. Click to mark it metered or not.");
+            ui.separator();
+            for palette in crate::theme::THEMES {
+                let clicked = ui
+                    .horizontal(|ui| {
+                        let clicked = ui.radio(current == palette.id, palette.name).clicked();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            crate::theme::swatch(ui, &palette);
+                        });
+                        clicked
+                    })
+                    .inner;
+                if clicked {
+                    choice = Some(palette.id.to_string());
+                    ui.close();
+                }
+            }
+        })
+        .0
+        .on_hover_text("Theme");
     choice
 }

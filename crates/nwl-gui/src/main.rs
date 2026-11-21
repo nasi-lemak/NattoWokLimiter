@@ -14,6 +14,7 @@ mod autostart;
 mod client;
 mod data;
 mod notify;
+mod theme;
 mod tray;
 
 use std::sync::{Arc, Mutex};

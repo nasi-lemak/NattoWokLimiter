@@ -30,7 +30,8 @@ There are three front ends over the same daemon:
   one-click block and limit, a connection inspector with host names and RTT, a rules editor with
   schedules and network conditions (e.g. only on a phone hotspot), traffic history graphs from the
   last hour to the last 90 days with CSV export, data usage per day and an event log. It can start
-  with your login, in the tray.
+  with your login, in the tray. Seven color themes (dark, light, Midnight, Forest, Sakura, Paper and
+  high contrast), or match the system's light/dark setting.
 * **The web dashboard**, served by the daemon at <http://127.0.0.1:7657>: the same app compiled to
   WebAssembly, so it has the same views, with nothing to install. (No tray, notifications or
   start-at-login there; those are the desktop app's.)
@@ -61,6 +62,7 @@ There are three front ends over the same daemon:
 | Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
+| Color themes (7, all checked for contrast), or follow the system's light/dark setting | ✅ | ✅ |
 
 Rules are evaluated predictably (see [rules](#rules)), and when a backend can't express a rule exactly
 it **reports a warning in the UI** instead of silently doing something else.
