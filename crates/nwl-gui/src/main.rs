@@ -41,7 +41,12 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
             "-V" | "--version" => {
-                println!("nattowok {}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "nattowok {}\n{}\nSource: {}",
+                    env!("CARGO_PKG_VERSION"),
+                    nwl_core::NOTICE,
+                    nwl_core::SOURCE
+                );
                 return Ok(());
             }
             _ => exit_usage(),

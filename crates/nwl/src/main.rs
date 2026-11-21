@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(version, about = "Control NattoWokLimiter: see who uses your network, block, limit and cap apps")]
+#[command(version, long_version = nwl_core::LONG_VERSION, about = "Control NattoWokLimiter: see who uses your network, block, limit and cap apps")]
 struct Cli {
     /// Daemon address.
     #[arg(long, global = true, default_value = "http://127.0.0.1:7657", env = "NWL_SERVER")]

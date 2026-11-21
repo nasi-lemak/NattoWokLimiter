@@ -59,7 +59,7 @@ jobs:
           cargo xtask web
           cargo build --release
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/nwld.exe, target/release/nwl.exe, target/release/nattowok.exe, README.md dist/
+          Copy-Item target/release/nwld.exe, target/release/nwl.exe, target/release/nattowok.exe, README.md, LICENSE dist/
           Compress-Archive -Path dist/* -DestinationPath nattowok-windows-x86_64.zip -Force
       # Downloads for testing; kept a week. Uploading is a convenience, so a
       # full artifact quota on the account must not fail the build.

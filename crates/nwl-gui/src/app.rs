@@ -193,6 +193,7 @@ pub struct NwlApp {
     form: RuleForm,
     usage_days: usize,
     show_notify_settings: bool,
+    show_about: bool,
     history_range: Range,
     /// App the History tab is filtered to; `None` for all traffic.
     history_app: Option<AppId>,
@@ -236,6 +237,7 @@ impl NwlApp {
             form: RuleForm::default(),
             usage_days: 30,
             show_notify_settings: false,
+            show_about: false,
             history_range: Range::Day,
             history_app: None,
             tray: {
@@ -642,6 +644,31 @@ impl NwlApp {
             }
         }
         self.show_notify_settings = open;
+    }
+
+    /// Name, version, copyright, license and where the source is.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_about;
+        egui::Window::new("About NattoWok Limiter")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.heading(format!("NattoWok Limiter {}", env!("CARGO_PKG_VERSION")));
+                ui.label("See which apps use your network, then block, limit or cap them.");
+                ui.add_space(6.0);
+                for line in nwl_core::NOTICE.lines() {
+                    ui.label(line);
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.hyperlink_to("Source code", nwl_core::SOURCE);
+                    ui.label("·");
+                    ui.hyperlink_to("License text", "https://www.gnu.org/licenses/gpl-3.0.html");
+                });
+            });
+        self.show_about = open;
     }
 
     fn limit_window(&mut self, ctx: &egui::Context) {
@@ -1331,7 +1358,7 @@ impl NwlApp {
         });
     }
 
-    fn footer(&self, ui: &mut Ui) {
+    fn footer(&mut self, ui: &mut Ui) {
         let d = lock(&self.data);
         ui.horizontal(|ui| {
             match &d.status {
@@ -1344,6 +1371,11 @@ impl NwlApp {
                 )),
                 None => ui.weak(self.client.base()),
             };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.link("About").clicked() {
+                    self.show_about = !self.show_about;
+                }
+            });
         });
         if let Some(s) = &d.status {
             if let Some(e) = &s.enforcement.error {
@@ -1805,6 +1837,7 @@ impl eframe::App for NwlApp {
         });
         self.limit_window(&ctx);
         self.notify_window(&ctx);
+        self.about_window(&ctx);
 
         let toast = lock(&self.data).toast.clone();
         if let Some((text, ok, at)) = toast {

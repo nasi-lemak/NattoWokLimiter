@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 #[derive(Parser, Debug)]
-#[command(version, about = "NattoWokLimiter daemon: per-app network monitor, firewall and bandwidth limiter")]
+#[command(version, long_version = nwl_core::LONG_VERSION, about = "NattoWokLimiter daemon: per-app network monitor, firewall and bandwidth limiter")]
 struct Args {
     /// Address for the API and web dashboard (loopback only).
     #[arg(long, default_value = "127.0.0.1:7657")]

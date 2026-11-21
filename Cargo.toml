@@ -8,6 +8,7 @@ default-members = ["crates/nwl-core", "crates/nwl-platform", "crates/nwld", "cra
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/nasi-lemak/NattoWokLimiter"
 
 [workspace.dependencies]

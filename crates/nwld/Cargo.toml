@@ -4,6 +4,8 @@ description = "NattoWokLimiter: per-application network monitor, firewall and ba
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 nwl-core.workspace = true
@@ -35,7 +37,8 @@ libc.workspace = true
 [package.metadata.deb]
 name = "nattowok"
 maintainer = "NattoWokLimiter project"
-copyright = "NattoWokLimiter contributors"
+copyright = "2026, The NattoWokLimiter contributors"
+license-file = ["../../LICENSE", "0"]
 section = "net"
 priority = "optional"
 extended-description = """\
@@ -64,9 +67,6 @@ systemd-units = { unit-scripts = "../../packaging", unit-name = "nwld", enable =
 
 [package.metadata.generate-rpm]
 name = "nattowok"
-# RPM requires a License tag. The project has not chosen a license yet;
-# replace this (and add `license` to the workspace) once it has.
-license = "LicenseRef-NotYetLicensed"
 summary = "Per-application network monitor, firewall and bandwidth limiter"
 assets = [
     { source = "target/release/nwld", dest = "/usr/bin/nwld", mode = "755" },
@@ -81,6 +81,7 @@ assets = [
     { source = "../../packaging/icons/nattowok-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/nattowok.png", mode = "644" },
     { source = "../../packaging/icons/nattowok-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/nattowok.png", mode = "644" },
     { source = "../../README.md", dest = "/usr/share/doc/nattowok/README.md", mode = "644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/nattowok/LICENSE", mode = "644" },
 ]
 # The equivalent of %systemd_post / %systemd_preun / %systemd_postun_with_restart.
 post_install_script = """

@@ -19,3 +19,23 @@ pub mod rate;
 pub mod remotes;
 pub mod rules;
 pub mod spikes;
+
+macro_rules! notice {
+    () => {
+        "Copyright (C) 2026 The NattoWokLimiter contributors.
+License GPL-3.0-or-later <https://www.gnu.org/licenses/gpl-3.0.html>.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law."
+    };
+}
+
+/// The copyright and license notice every program shows (`--version`, the
+/// app's About window), as the GPL asks of interactive programs.
+pub const NOTICE: &str = notice!();
+
+/// Where the source code is.
+pub const SOURCE: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// `--version` text: the version, then [`NOTICE`] and [`SOURCE`].
+pub const LONG_VERSION: &str =
+    concat!(env!("CARGO_PKG_VERSION"), "\n", notice!(), "\nSource: ", env!("CARGO_PKG_REPOSITORY"));

@@ -270,8 +270,7 @@ pages).
 
 See [docs/ROADMAP.md](docs/ROADMAP.md). The big ones: enforcement in eBPF (instant classification,
 true shaping and priorities), a Windows packet driver for download limits and UDP counts,
-ask-on-first-connection firewall prompts, domain rules from DNS answers, network profiles, and a tray
-icon for the desktop app.
+ask-on-first-connection firewall prompts, domain rules from DNS answers, and network profiles.
 
 ## Development
 
@@ -282,8 +281,23 @@ cargo clippy --all-targets
 cargo clippy --all-targets --target x86_64-pc-windows-msvc            # check the Windows backend from Linux
 cargo run -p nwld -- --demo      # daemon with simulated traffic
 cargo run -p nwl-gui             # desktop app
+cargo clippy -p nwl-gui --target wasm32-unknown-unknown               # check the web build
+cargo xtask web --dev            # build the web dashboard quickly, then rebuild nwld
 ```
 
 The desktop app needs no system libraries to build. At runtime on Linux it uses the usual desktop
 libraries (OpenGL, `libxkbcommon`, X11 or Wayland), which every desktop distribution ships.
-```
+
+## License
+
+NattoWokLimiter is free software: you can redistribute it and/or modify it under the terms of the
+[GNU General Public License](LICENSE), version 3 or (at your option) any later version
+(`GPL-3.0-or-later`). It comes with no warranty.
+
+This is a copyleft license: anyone who distributes NattoWokLimiter, changed or not, must pass on the
+same freedoms, which includes offering the source code. Contributions are accepted under the same
+license.
+
+The eBPF programs nwld loads into the kernel are part of this code and declare a GPL license to the
+kernel. Third-party crates keep their own licenses, all compatible with the GPL (mostly MIT and
+Apache-2.0); the bundled egui fonts are under the SIL Open Font License and the Ubuntu Font Licence.
