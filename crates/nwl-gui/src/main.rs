@@ -72,6 +72,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             set_fonts(&cc.egui_ctx);
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             let client = client::Client::new(&server);
             let shared = Arc::new(Mutex::new(data::Data::new()));
             let ctx = cc.egui_ctx.clone();
@@ -98,6 +99,7 @@ fn main() {
                 eframe::WebOptions::default(),
                 Box::new(|cc| {
                     set_fonts(&cc.egui_ctx);
+                    egui_extras::install_image_loaders(&cc.egui_ctx);
                     let client = client::Client::same_origin();
                     let shared = Arc::new(Mutex::new(data::Data::new()));
                     let ctx = cc.egui_ctx.clone();

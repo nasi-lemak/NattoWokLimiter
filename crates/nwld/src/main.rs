@@ -175,6 +175,9 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("opening state directory {}", state_dir.display()))?;
     let mut engine = Engine::new(store, args.history)?;
     engine.set_count_loopback(args.include_loopback);
+    // Friendly names and icons. Also in the demo: its apps get the real
+    // icons of the same apps installed here.
+    engine.set_catalog(nwl_platform::appinfo::native_catalog());
     if !args.no_resolve {
         let lookup = if args.demo { nwl_platform::sim::demo_hostname } else { resolver::system_lookup };
         engine.set_resolver(resolver::Resolver::new(4, lookup));

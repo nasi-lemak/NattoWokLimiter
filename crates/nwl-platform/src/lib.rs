@@ -20,6 +20,7 @@ use nwl_core::model::{AppId, Snapshot};
 use nwl_core::rules::{Action, RuleId, RuleSet};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod appinfo;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod network;

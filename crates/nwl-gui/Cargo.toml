@@ -18,7 +18,9 @@ serde_json.workspace = true
 chrono.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 egui_plot = "0.37"
-egui_extras = "0.36"
+# App icons: PNG and SVG files the daemon serves.
+egui_extras = { version = "0.36", features = ["image", "svg"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 # std::time::Instant on native; the browser's clock on the web.
 web-time = "1.1"
 

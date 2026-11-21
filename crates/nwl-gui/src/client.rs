@@ -42,6 +42,11 @@ impl Client {
         serde_json::from_value(value).map_err(|e| format!("unexpected response from {path}: {e}"))
     }
 
+    /// A binary response (icons) and its content type.
+    pub async fn get_bytes(&self, path: &str) -> Result<(Vec<u8>, String), String> {
+        self.fetch_bytes(path).await
+    }
+
     /// Sends a request; errors carry the daemon's message when it has one.
     pub async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
         let text = self.request(method, path, body).await?;
@@ -59,6 +64,20 @@ impl Client {
     /// A response body as text (blocking; for CSV downloads).
     pub fn get_text(&self, path: &str) -> Result<String, String> {
         pollster::block_on(self.request("GET", path, None))
+    }
+
+    async fn fetch_bytes(&self, path: &str) -> Result<(Vec<u8>, String), String> {
+        match self.agent.get(&format!("{}{path}", self.base)).call() {
+            Ok(r) => {
+                let kind = r.content_type().to_string();
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::Read::take(r.into_reader(), 4 << 20), &mut bytes)
+                    .map_err(|e| e.to_string())?;
+                Ok((bytes, kind))
+            }
+            Err(ureq::Error::Status(code, _)) => Err(format!("daemon returned {code}")),
+            Err(e) => Err(format!("cannot reach nwld at {}: {e}", self.base)),
+        }
     }
 
     async fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, String> {
@@ -83,6 +102,22 @@ impl Client {
     pub fn same_origin() -> Self {
         let base = web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default();
         Self { base }
+    }
+
+    async fn fetch_bytes(&self, path: &str) -> Result<(Vec<u8>, String), String> {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen_futures::JsFuture;
+        let failed = |e: wasm_bindgen::JsValue| format!("fetching {path}: {e:?}");
+        let window = web_sys::window().ok_or("no window")?;
+        let url = format!("{}{path}", self.base);
+        let resp: web_sys::Response =
+            JsFuture::from(window.fetch_with_str(&url)).await.map_err(failed)?.unchecked_into();
+        if !resp.ok() {
+            return Err(format!("daemon returned {}", resp.status()));
+        }
+        let kind = resp.headers().get("content-type").ok().flatten().unwrap_or_default();
+        let buffer = JsFuture::from(resp.array_buffer().map_err(failed)?).await.map_err(failed)?;
+        Ok((js_sys::Uint8Array::new(&buffer).to_vec(), kind))
     }
 
     async fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, String> {

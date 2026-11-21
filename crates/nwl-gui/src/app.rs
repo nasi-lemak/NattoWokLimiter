@@ -301,6 +301,8 @@ pub struct NwlApp {
     /// The chosen theme (`"system"` or a theme id), and the palette applied.
     theme: String,
     applied_theme: &'static str,
+    /// Image URIs of app icons registered with egui.
+    icon_uris: std::collections::HashMap<AppId, String>,
     history_range: Range,
     /// App the History tab is filtered to; `None` for all traffic.
     history_app: Option<AppId>,
@@ -347,6 +349,7 @@ impl NwlApp {
             show_about: false,
             theme: crate::theme::load(),
             applied_theme: "",
+            icon_uris: Default::default(),
             history_range: Range::Day,
             history_app: None,
             tray: {
@@ -639,6 +642,7 @@ impl NwlApp {
     }
 
     fn apps_tab(&mut self, ui: &mut Ui) {
+        let icons = self.icon_uris.clone();
         ui.add(
             egui::TextEdit::singleline(&mut self.app_filter)
                 .hint_text("Filter applications…")
@@ -709,7 +713,7 @@ impl NwlApp {
                             let tag = app_quota(&a.rules, &quotas).map(|q| {
                                 (quota_text(q), quota_color(q), Some(q.used as f32 / q.limit.max(1) as f32))
                             });
-                            app_cell(ui, &a.name, &a.app.0, a.blocked, tag);
+                            app_cell(ui, &a.name, &a.app.0, a.blocked, tag, &icons);
                         });
                         row.col(|ui| sparkline(ui, &histories[i]));
                         row.col(|ui| {
@@ -1300,6 +1304,7 @@ impl NwlApp {
     }
 
     fn usage_tab(&mut self, ui: &mut Ui) {
+        let icons = self.icon_uris.clone();
         ui.horizontal(|ui| {
             ui.strong("Data usage");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1390,7 +1395,7 @@ impl NwlApp {
             .body(|mut body| {
                 for (app, name, down, up) in rows.iter().take(200) {
                     body.row(44.0, |mut row| {
-                        row.col(|ui| app_cell(ui, name, app, false, None));
+                        row.col(|ui| app_cell(ui, name, app, false, None, &icons));
                         row.col(|ui| {
                             ui.monospace(format_bytes(*down));
                         });
@@ -1422,6 +1427,7 @@ impl NwlApp {
     }
 
     fn history_tab(&mut self, ui: &mut Ui) {
+        let icons = self.icon_uris.clone();
         let (view, apps): (Option<nwl_core::api::HistoryView>, Vec<(AppId, String)>) = {
             let d = lock(&self.data);
             let mut apps: Vec<(AppId, String)> =
@@ -1541,7 +1547,7 @@ impl NwlApp {
             .body(|mut body| {
                 for a in view.apps.iter().take(50) {
                     body.row(44.0, |mut row| {
-                        row.col(|ui| app_cell(ui, &a.name, &a.app.0, false, None));
+                        row.col(|ui| app_cell(ui, &a.name, &a.app.0, false, None, &icons));
                         row.col(|ui| {
                             ui.monospace(format_bytes(a.down));
                         });
@@ -1797,22 +1803,40 @@ fn quota_text(q: &nwl_core::quota::QuotaStatus) -> String {
 
 /// An app's icon, name and path; `tag` adds a colored note after the name,
 /// with a small progress bar when it has a fraction (quotas).
-fn app_cell(ui: &mut Ui, name: &str, path: &str, blocked: bool, tag: Option<(String, Color32, Option<f32>)>) {
+fn app_cell(
+    ui: &mut Ui,
+    name: &str,
+    path: &str,
+    blocked: bool,
+    tag: Option<(String, Color32, Option<f32>)>,
+    icons: &std::collections::HashMap<AppId, String>,
+) {
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
-        let mut color = avatar_color(path);
-        if blocked {
-            color = color.gamma_multiply(0.4);
+        // The app's own icon when the daemon has one, else a colored letter.
+        match icons.get(&AppId(path.to_string())) {
+            Some(uri) => {
+                let tint = if blocked { Color32::from_white_alpha(90) } else { Color32::WHITE };
+                ui.add(
+                    egui::Image::from_uri(uri.clone()).fit_to_exact_size(egui::vec2(26.0, 26.0)).tint(tint),
+                );
+            }
+            None => {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
+                let mut color = avatar_color(path);
+                if blocked {
+                    color = color.gamma_multiply(0.4);
+                }
+                ui.painter().rect_filled(rect, 6.0, color);
+                let letter = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    letter,
+                    egui::FontId::proportional(14.0),
+                    Color32::WHITE,
+                );
+            }
         }
-        ui.painter().rect_filled(rect, 6.0, color);
-        let letter = name.chars().next().unwrap_or('?').to_uppercase().to_string();
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            letter,
-            egui::FontId::proportional(14.0),
-            Color32::WHITE,
-        );
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let mut n = RichText::new(name).strong();
@@ -2142,6 +2166,16 @@ impl eframe::App for NwlApp {
         if palette.id != self.applied_theme {
             crate::theme::apply(&ctx, &palette);
             self.applied_theme = palette.id;
+        }
+        // Hand newly fetched app icons to egui's image loaders.
+        {
+            let d = lock(&self.data);
+            for (app, icon) in &d.icons {
+                if let (Some((uri, bytes)), false) = (icon, self.icon_uris.contains_key(app)) {
+                    ctx.include_bytes(uri.clone(), bytes.clone());
+                    self.icon_uris.insert(app.clone(), uri.clone());
+                }
+            }
         }
         let bar = |margin: egui::Margin| {
             egui::Frame::new()

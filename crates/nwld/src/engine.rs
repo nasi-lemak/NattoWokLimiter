@@ -16,6 +16,7 @@ use nwl_core::quota::{QuotaStatus, QuotaTracker, QuotaUsage};
 use nwl_core::remotes::{RemoteStats, RemoteTracker};
 use nwl_core::rules::{Action, Day, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
 use nwl_core::spikes::SpikeDetector;
+use nwl_platform::appinfo::{AppCatalog, AppInfo};
 use nwl_platform::{EnforceReport, Policy};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -68,6 +69,10 @@ pub struct Engine {
     conn_rates: HashMap<ConnKey, (u64, u64)>,
     /// A representative process per app, for matching app patterns.
     app_samples: HashMap<AppId, ProcessInfo>,
+    /// Friendly names and icons (from `.desktop` entries), looked up once
+    /// per app; `None` when there is nothing better than the program name.
+    catalog: Option<Box<dyn AppCatalog>>,
+    app_info: HashMap<AppId, Option<AppInfo>>,
     exhausted: Vec<RuleId>,
     /// Recently deleted quota rules and their usage, so that undoing a
     /// delete (re-adding the identical rule) keeps what was counted.
@@ -143,6 +148,8 @@ impl Engine {
             snapshot: Snapshot::default(),
             conn_rates: HashMap::new(),
             app_samples: HashMap::new(),
+            catalog: None,
+            app_info: HashMap::new(),
             exhausted: Vec::new(),
             removed_quotas: VecDeque::new(),
             events: VecDeque::new(),
@@ -160,6 +167,35 @@ impl Engine {
     pub fn add_startup_warning(&mut self, warning: String) {
         self.status.warnings.push(warning.clone());
         self.startup_warnings.push(warning);
+    }
+
+    pub fn set_catalog(&mut self, catalog: Box<dyn AppCatalog>) {
+        self.catalog = Some(catalog);
+        self.app_info.clear();
+    }
+
+    /// Looks up apps not seen before in the catalog.
+    fn learn_apps(&mut self, apps: impl IntoIterator<Item = AppId>) {
+        let Some(catalog) = &mut self.catalog else { return };
+        for app in apps {
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.app_info.entry(app) {
+                let info = catalog.lookup(slot.key());
+                slot.insert(info);
+            }
+        }
+    }
+
+    /// The app's display name: its catalog name, or the program's.
+    fn app_name(&self, app: &AppId) -> String {
+        match self.app_info.get(app) {
+            Some(Some(info)) => info.name.clone(),
+            _ => app.display_name().to_string(),
+        }
+    }
+
+    /// The icon file of an app, if the catalog found one.
+    pub fn icon(&self, app: &str) -> Option<std::path::PathBuf> {
+        self.app_info.get(&AppId(app.to_string()))?.as_ref()?.icon.clone()
     }
 
     pub fn set_resolver(&mut self, resolver: Resolver) {
@@ -282,10 +318,12 @@ impl Engine {
         self.history.record(now.timestamp(), system_delta, app_deltas.iter().map(|(app, b)| (app, *b)));
 
         let mut new_apps = Vec::new();
+        let seen: Vec<AppId> = snap.processes.values().map(|p| p.app_id()).collect();
+        self.learn_apps(seen);
         for process in snap.processes.values() {
             let app = process.app_id();
             if self.known_apps.insert(app.clone()) && !self.suppress_new_app_events {
-                new_apps.push((app.clone(), app.display_name().to_string()));
+                new_apps.push((app.clone(), self.app_name(&app)));
             }
             self.app_samples.insert(app, process.clone());
         }
@@ -302,7 +340,7 @@ impl Engine {
         let accountant = &self.accountant;
         self.spikes.retain(|app| accountant.apps().any(|a| &a.app == app));
         for s in spikes {
-            let name = s.app.display_name().to_string();
+            let name = self.app_name(&s.app);
             self.push_event(EventKind::TrafficSpike {
                 app: s.app,
                 name,
@@ -485,9 +523,11 @@ impl Engine {
                         && (matches!(r.action, Action::Block { direction: Direction::Both })
                             || self.exhausted.contains(&r.id))
                 });
+                let info = self.app_info.get(&s.app).and_then(Option::as_ref);
                 AppView {
                     app: s.app.clone(),
-                    name: s.name.clone(),
+                    name: info.map_or_else(|| s.name.clone(), |i| i.name.clone()),
+                    icon: info.is_some_and(|i| i.icon.is_some()),
                     pids: s.pids.iter().copied().collect(),
                     connections: s.connections,
                     rate_up: s.rate_up,
@@ -1047,6 +1087,29 @@ mod tests {
         };
         e.add_rule(other).unwrap();
         assert_eq!(e.quota_status()[0].used, 0);
+    }
+
+    #[test]
+    fn apps_get_catalog_names_and_icons() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Fake(std::sync::Arc<AtomicUsize>);
+        impl AppCatalog for Fake {
+            fn lookup(&mut self, app: &AppId) -> Option<AppInfo> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                (app.0 == "/opt/steam/steam")
+                    .then(|| AppInfo { name: "Steam".into(), icon: Some("/icons/steam.png".into()) })
+            }
+        }
+        let lookups = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut e = Engine::new(temp_store("catalog"), 10).unwrap();
+        e.set_catalog(Box::new(Fake(lookups.clone())));
+        e.ingest(snap(0, 0, 0), at(12));
+        e.ingest(snap(1000, 10, 10), at(12));
+        let app = &e.apps()[0];
+        assert_eq!((app.name.as_str(), app.icon), ("Steam", true));
+        assert_eq!(e.icon("/opt/steam/steam"), Some("/icons/steam.png".into()));
+        assert_eq!(e.icon("/usr/bin/other"), None);
+        assert_eq!(lookups.load(Ordering::Relaxed), 1, "looked up once per app");
     }
 
     #[test]

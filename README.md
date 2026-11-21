@@ -61,6 +61,7 @@ There are three front ends over the same daemon:
 | Buttons on notifications: "Block" a new app, "Block" or "Limit to 1 MB/s" on a spike | ✅ | ❌ (plain notifications) |
 | Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
 | Edit rules in place, undo deletes (quota usage included), quota progress on each app and in the tray | ✅ | ✅ |
+| Apps shown with their own name and icon ("Firefox Web Browser"), from installed `.desktop` entries | ✅ | ❌ (program name, letter icon) |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
 | Color themes (7, all checked for contrast), or follow the system's light/dark setting | ✅ | ✅ |
@@ -263,6 +264,7 @@ pages).
 | PUT/DELETE | `/api/rules/{id}` | replace / delete |
 | POST | `/api/rules/{id}/move` | `{"index": n}` reorder |
 | POST | `/api/pause` | `{"paused": true}` pauses all rules, `false` resumes |
+| GET | `/api/icon?app=PATH` | the app's icon (PNG or SVG), when its `.desktop` entry has one |
 | GET/PUT | `/api/network` | the current network; `{"metered": true \| false \| null}` overrides detection for it |
 | GET | `/api/quotas` | quota usage in the current period |
 | GET | `/api/usage?days=N` | per-app bytes per day |

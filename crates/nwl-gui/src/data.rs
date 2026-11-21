@@ -50,6 +50,9 @@ pub struct Data {
     pub rule_form_result: Option<Result<(), String>>,
     /// The "Undo" for the toast shown at that instant.
     pub toast_undo: Option<(Instant, Call)>,
+    /// App icons fetched from the daemon: `(uri, bytes)` for egui's image
+    /// loaders; `None` if fetching failed (not retried).
+    pub icons: HashMap<AppId, Option<Icon>>,
     last_mono: u64,
     last_event: u64,
     primed: bool,
@@ -113,6 +116,9 @@ impl Call {
 }
 
 pub type Shared = Arc<Mutex<Data>>;
+
+/// An app icon: an image URI for egui's loaders, and the file's bytes.
+pub type Icon = (String, Arc<[u8]>);
 
 pub fn lock(data: &Shared) -> std::sync::MutexGuard<'_, Data> {
     data.lock().unwrap_or_else(|p| p.into_inner())
@@ -294,60 +300,70 @@ async fn poll(client: &Client, data: &Shared, timers: &mut Timers) {
         None
     };
 
-    let mut d = lock(data);
-    d.connected = true;
-    d.error = None;
-    if let Some((system, apps)) = initial {
-        d.system = system.into_iter().rev().take(HISTORY).rev().collect();
-        for a in apps {
-            let h: VecDeque<_> = a.history.iter().copied().rev().take(SPARK).rev().collect();
-            d.app_history.insert(a.app, h);
-        }
-        d.primed = true;
-    } else if overview.mono_ms != d.last_mono {
-        let sample = (overview.system.rate_up, overview.system.rate_down);
-        Data::push(&mut d.system, sample, HISTORY);
-        for a in &overview.apps {
-            let h = d.app_history.entry(a.app.clone()).or_default();
-            Data::push(h, (a.rate_up, a.rate_down), SPARK);
-        }
-    }
-    d.last_mono = overview.mono_ms;
-    let live: std::collections::HashSet<&AppId> = overview.apps.iter().map(|a| &a.app).collect();
-    d.app_history.retain(|k, _| live.contains(k));
-    let notify_after = *d.notify_after.get_or_insert(overview.last_event);
-    let mut notifications = Vec::new();
-    for e in events {
-        if e.id > notify_after && d.notify.wants(&e.kind) {
-            if let Some((title, body)) = crate::notify::text(&e.kind) {
-                notifications.push((title, body, crate::notify::buttons(&e.kind)));
+    let (notifications, missing) = {
+        let mut d = lock(data);
+        d.connected = true;
+        d.error = None;
+        if let Some((system, apps)) = initial {
+            d.system = system.into_iter().rev().take(HISTORY).rev().collect();
+            for a in apps {
+                let h: VecDeque<_> = a.history.iter().copied().rev().take(SPARK).rev().collect();
+                d.app_history.insert(a.app, h);
+            }
+            d.primed = true;
+        } else if overview.mono_ms != d.last_mono {
+            let sample = (overview.system.rate_up, overview.system.rate_down);
+            Data::push(&mut d.system, sample, HISTORY);
+            for a in &overview.apps {
+                let h = d.app_history.entry(a.app.clone()).or_default();
+                Data::push(h, (a.rate_up, a.rate_down), SPARK);
             }
         }
-        d.last_event = d.last_event.max(e.id);
-        d.events.insert(0, e);
-    }
-    d.events.truncate(500);
-    if let Some(s) = status {
-        d.status = Some(s);
-    }
-    if let Some(r) = rules {
-        d.rules = r;
-    }
-    if let Some(c) = connections {
-        d.connections = c;
-    }
-    if let Some(u) = usage {
-        d.usage = u;
-    }
-    // Ignore a response for an app that is no longer selected.
-    if let Some(r) = remotes.filter(|_| d.remotes_app == remotes_app) {
-        d.remotes = r;
-    }
-    if let Some(h) = history.filter(|_| d.history_query == history_query) {
-        d.history = Some(h);
-    }
-    d.overview = Some(overview);
-    drop(d);
+        d.last_mono = overview.mono_ms;
+        let live: std::collections::HashSet<&AppId> = overview.apps.iter().map(|a| &a.app).collect();
+        d.app_history.retain(|k, _| live.contains(k));
+        let notify_after = *d.notify_after.get_or_insert(overview.last_event);
+        let mut notifications = Vec::new();
+        for e in events {
+            if e.id > notify_after && d.notify.wants(&e.kind) {
+                if let Some((title, body)) = crate::notify::text(&e.kind) {
+                    notifications.push((title, body, crate::notify::buttons(&e.kind)));
+                }
+            }
+            d.last_event = d.last_event.max(e.id);
+            d.events.insert(0, e);
+        }
+        d.events.truncate(500);
+        if let Some(s) = status {
+            d.status = Some(s);
+        }
+        if let Some(r) = rules {
+            d.rules = r;
+        }
+        if let Some(c) = connections {
+            d.connections = c;
+        }
+        if let Some(u) = usage {
+            d.usage = u;
+        }
+        // Ignore a response for an app that is no longer selected.
+        if let Some(r) = remotes.filter(|_| d.remotes_app == remotes_app) {
+            d.remotes = r;
+        }
+        if let Some(h) = history.filter(|_| d.history_query == history_query) {
+            d.history = Some(h);
+        }
+        // Apps whose icon to fetch, a few per tick.
+        let missing: Vec<AppId> = overview
+            .apps
+            .iter()
+            .filter(|a| a.icon && !d.icons.contains_key(&a.app))
+            .map(|a| a.app.clone())
+            .take(4)
+            .collect();
+        d.overview = Some(overview);
+        (notifications, missing)
+    };
     // Shown outside the lock: talking to the notification service can take
     // a moment and the UI must not wait for it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -366,4 +382,16 @@ async fn poll(client: &Client, data: &Shared, timers: &mut Timers) {
     // The browser shows no notifications (the setting is off there).
     #[cfg(target_arch = "wasm32")]
     drop(notifications);
+    // Icons of apps that have one, a few per tick.
+    for app in missing {
+        let icon =
+            client.get_bytes(&format!("/api/icon?app={}", crate::client::encode(&app.0))).await.ok().map(
+                |(bytes, kind)| {
+                    let ext = if kind.contains("svg") { "svg" } else { "png" };
+                    let uri = format!("bytes://nwl-icon/{}.{ext}", crate::client::encode(&app.0));
+                    (uri, Arc::from(bytes))
+                },
+            );
+        lock(data).icons.insert(app, icon);
+    }
 }

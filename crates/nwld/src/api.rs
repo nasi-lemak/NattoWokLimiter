@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/rules/:id/move", post(move_rule))
         .route("/api/pause", post(pause))
         .route("/api/network", get(network).put(set_network))
+        .route("/api/icon", get(icon))
         .route("/api/quotas", get(quotas))
         .route("/api/events", get(events))
         .route("/api/usage", get(usage))
@@ -276,6 +277,31 @@ async fn pause(State(s): State<AppState>, Json(body): Json<PauseBody>) -> Respon
     s.engine().set_paused(body.paused);
     s.reapply();
     Json(s.engine().status.clone()).into_response()
+}
+
+#[derive(Deserialize)]
+struct IconQuery {
+    app: String,
+}
+
+/// An app's icon (PNG or SVG), if the catalog found one. Only files the
+/// catalog chose are ever served: the query is a lookup key, not a path.
+async fn icon(State(s): State<AppState>, Query(q): Query<IconQuery>) -> Response {
+    let Some(path) = s.engine().icon(&q.app) else {
+        return error(StatusCode::NOT_FOUND, "no icon for this app");
+    };
+    let svg = path.extension().is_some_and(|e| e == "svg");
+    match std::fs::read(&path) {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, if svg { "image/svg+xml" } else { "image/png" }),
+                (header::CACHE_CONTROL, "max-age=3600"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => error(StatusCode::NOT_FOUND, &format!("reading the icon: {e}")),
+    }
 }
 
 async fn network(State(s): State<AppState>) -> impl IntoResponse {

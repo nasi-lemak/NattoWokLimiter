@@ -120,7 +120,11 @@ pub struct EnforcementStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppView {
     pub app: AppId,
+    /// Display name: the app's own ("Firefox") when known, else the program's.
     pub name: String,
+    /// Whether `GET /api/icon?app=` has an icon for it.
+    #[serde(default)]
+    pub icon: bool,
     pub pids: Vec<u32>,
     pub connections: usize,
     pub rate_up: u64,
