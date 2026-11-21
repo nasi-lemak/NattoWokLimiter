@@ -296,6 +296,29 @@ impl Monitor for SimulatedMonitor {
 
 /// Host names for the simulated remote addresses (stands in for reverse DNS
 /// in demo mode, so the demo works offline).
+/// The domains the demo apps "looked up", as if DNS answers had been seen.
+pub fn demo_dns() -> Vec<nwl_core::dns::Answer> {
+    [
+        ("142.250.74.78", "www.google.com"),
+        ("151.101.1.140", "www.reddit.com"),
+        ("2a00:1450:4001:82b::200e", "www.youtube.com"),
+        ("23.62.226.10", "cdn.steamstatic.com"),
+        ("155.133.248.39", "cm.steampowered.com"),
+        ("162.159.135.234", "discord.com"),
+        ("35.214.203.66", "frankfurt.discord.media"),
+        ("35.186.224.25", "audio-ak.spotifycdn.com"),
+        ("162.125.19.131", "content.dropboxapi.com"),
+        ("52.219.170.33", "backups.s3.eu-central-1.amazonaws.com"),
+    ]
+    .into_iter()
+    .map(|(ip, name)| nwl_core::dns::Answer {
+        ip: ip.parse().expect("valid demo address"),
+        names: vec![name.to_string()],
+        ttl: 6 * 3600,
+    })
+    .collect()
+}
+
 pub fn demo_hostname(ip: std::net::IpAddr) -> Option<String> {
     let name = match ip.to_string().as_str() {
         "142.250.74.78" => "fra24s06-in-f14.1e100.net",

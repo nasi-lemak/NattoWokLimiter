@@ -204,6 +204,11 @@ pub struct Matcher {
     pub local_ports: Vec<PortRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
+    /// Remote domains (`example.com` includes its subdomains; `*` globs).
+    /// They stand for the addresses DNS answers gave for them, added to
+    /// `remote`; see [`RuleSet::resolve_domains`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<crate::dns::DomainPattern>,
 }
 
 /// What a matcher is evaluated against.
@@ -223,6 +228,11 @@ impl Matcher {
             }
         }
         if self.protocol.is_some_and(|p| p != key.protocol) {
+            return false;
+        }
+        // Domains without known addresses match nothing (an empty `remote`
+        // would mean every address).
+        if !self.domains.is_empty() && self.remote.is_empty() {
             return false;
         }
         if !self.remote.is_empty() {
@@ -449,6 +459,9 @@ impl Rule {
             parts.push(p.to_string().to_uppercase());
         }
         let join = |items: Vec<String>| items.join(",");
+        if !m.domains.is_empty() {
+            parts.push(format!("domain {}", join(m.domains.iter().map(|d| d.to_string()).collect())));
+        }
         if !m.remote.is_empty() {
             parts.push(format!("to {}", join(m.remote.iter().map(|n| n.to_string()).collect())));
         }
@@ -558,6 +571,24 @@ impl RuleSet {
         set
     }
 
+    /// Turns domain conditions into addresses: each rule's `domains` add the
+    /// addresses `resolve` currently knows for them to its `remote`. A
+    /// domain rule with no address yet is disabled, since an empty `remote`
+    /// would cover every address.
+    pub fn resolve_domains(&mut self, resolve: impl Fn(&[crate::dns::DomainPattern]) -> Vec<IpAddr>) {
+        for rule in self.rules.iter_mut().filter(|r| !r.matcher.domains.is_empty()) {
+            for ip in resolve(&rule.matcher.domains) {
+                let ip = normalize_ip(ip);
+                if !rule.matcher.remote.iter().any(|n| n.contains(&ip)) {
+                    rule.matcher.remote.push(IpNet::from(ip));
+                }
+            }
+            if rule.matcher.remote.is_empty() {
+                rule.enabled = false;
+            }
+        }
+    }
+
     /// Evaluates the rules against one socket. `exhausted_quotas` lists quota
     /// rules whose cap has been reached in the current period; they block.
     pub fn decide(&self, ctx: &MatchCtx<'_>, exhausted_quotas: &[RuleId]) -> Decision {
@@ -601,6 +632,9 @@ fn validate(rule: &Rule) -> Result<(), RuleError> {
         }
         _ if rule.schedule.as_ref().is_some_and(|s| s.from.is_some() != s.until.is_some()) => {
             invalid("a schedule needs both `from` and `until`, or neither")
+        }
+        _ if rule.matcher.domains.iter().any(|d| !d.is_valid()) => {
+            invalid("domains look like `example.com` or `*.example.com`")
         }
         _ if rule.network.as_ref().is_some_and(|n| n.is_empty()) => {
             invalid("a network condition needs `metered` and/or network `names`")
@@ -811,6 +845,36 @@ mod tests {
         assert!(set.rules[0].enabled, "the stored rule is untouched");
         let half = r#"{"action":{"type":"allow"},"schedule":{"from":"09:00"}}"#;
         assert!(RuleSet::default().add(rule(half)).is_err());
+    }
+
+    #[test]
+    fn domain_rules_become_addresses() {
+        use crate::dns::DomainPattern;
+        let mut set = RuleSet::new(vec![
+            rule(r#"{"match":{"domains":["ads.example"]},"action":{"type":"block"}}"#),
+            rule(r#"{"match":{"domains":["unknown.example"]},"action":{"type":"block"}}"#),
+            rule(
+                r#"{"match":{"domains":["cdn.example"],"remote":["10.0.0.0/8"]},"action":{"type":"allow"}}"#,
+            ),
+        ])
+        .unwrap();
+        assert_eq!(set.rules[0].scope_summary(), "all apps · domain ads.example");
+        let unresolved = conn("192.0.2.1:443", 5000);
+        let ctx = MatchCtx { conn: &unresolved, process: None };
+        assert!(!set.rules[1].matcher.matches(&ctx), "an unresolved domain matches nothing");
+        set.resolve_domains(|d: &[DomainPattern]| match d[0].0.as_str() {
+            "ads.example" => vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()],
+            "cdn.example" => vec!["10.1.2.3".parse().unwrap(), "192.0.2.9".parse().unwrap()],
+            _ => vec![],
+        });
+        assert_eq!(set.rules[0].matcher.remote.len(), 2);
+        assert!(set.rules[0].matcher.matches(&ctx));
+        assert!(!set.rules[1].enabled, "disabled until its domain resolves");
+        let cdn: Vec<String> = set.rules[2].matcher.remote.iter().map(|n| n.to_string()).collect();
+        assert_eq!(cdn, ["10.0.0.0/8", "192.0.2.9/32"], "addresses inside `remote` aren't repeated");
+        assert!(RuleSet::default()
+            .add(rule(r#"{"match":{"domains":["bad domain"]},"action":{"type":"block"}}"#))
+            .is_err());
     }
 
     #[test]

@@ -166,6 +166,18 @@ enum Cmd {
         #[command(flatten)]
         when: When,
     },
+    /// Block domains (and their subdomains) for all apps or one, e.g.
+    /// `nwl block-domain doubleclick.net`. Matched by the addresses DNS
+    /// answers gave for them.
+    BlockDomain {
+        #[arg(required = true)]
+        domains: Vec<String>,
+        /// Only for this application.
+        #[arg(long)]
+        app: Option<String>,
+        #[command(flatten)]
+        when: When,
+    },
     /// Limit an application's bandwidth, e.g. `nwl limit steam --down 5MB/s`.
     Limit {
         app: String,
@@ -581,6 +593,18 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 &when,
             )?,
         )?,
+        Cmd::BlockDomain { domains, app, when } => {
+            let mut matcher = json!({ "domains": domains });
+            let mut name = format!("Block {}", domains.join(", "));
+            if let Some(app) = app {
+                name += &format!(" for {app}");
+                matcher["app"] = json!(app);
+            }
+            add_rule(
+                &c,
+                with_schedule(json!({"name": name, "match": matcher, "action": {"type": "block"}}), &when)?,
+            )?
+        }
         Cmd::Limit { app, down, up, when } => {
             if down.is_none() && up.is_none() {
                 bail!("give --down and/or --up");

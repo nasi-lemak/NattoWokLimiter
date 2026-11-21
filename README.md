@@ -65,6 +65,7 @@ There are three front ends over the same daemon:
 | Backup and restore of rules and network choices (replace or merge; drop the file on the window) | ✅ | ✅ |
 | Presets: "Hotspot saver", "Calm background downloads", "Focus hours" (one click, removable) | ✅ | ✅ |
 | Program fingerprints (SHA-256): an event and notification when an app's program changes, updated or replaced | ✅ | ✅ |
+| Domain names from DNS answers on connections; rules by domain (`doubleclick.net`, `*.ads.example`) | ✅ watches DNS answers (root) | ⚠️ exact domains only (looked up directly) |
 | Per-connection actions: close it, block its host for the app or for everyone | ✅ (sock_diag destroy) | ⚠️ close: IPv4 TCP only |
 | Apps shown with their own name and icon ("Firefox Web Browser"), from installed `.desktop` entries | ✅ | ❌ (program name, letter icon) |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
@@ -134,6 +135,7 @@ nwl top [-w]                     apps by current traffic (-w to watch)
 nwl conns [--app PATH] [-a]      sockets with owner, rates, RTT, policy
 nwl rules                        rules in evaluation order
 nwl block APP [--direction in|out|both]          [WHEN]
+nwl block-domain DOMAIN… [--app APP]            [WHEN]
 nwl limit APP [--down RATE] [--up RATE]          [WHEN]
 nwl quota APP SIZE [--per day|week|month] [--direction in|out|both] [WHEN]
       WHEN: --days mon,tue,…|weekdays|weekends  --from HH:MM --until HH:MM
@@ -208,6 +210,13 @@ itself. On Windows, a network is metered when "Set as metered connection" is on 
 for mobile broadband. Wherever detection is missing or wrong, mark the network yourself, with
 `nwl network metered` or the network menu in the app's header; the choice is remembered per network.
 Off the matching networks a rule behaves as if disabled, like outside its schedule.
+
+Rules can name **domains**: `"match": {"domains": ["doubleclick.net"]}` covers `doubleclick.net` and
+its subdomains, `*` makes a glob. A domain stands for the addresses DNS answers gave for it: on Linux
+nwld watches DNS responses (a kernel filter passes only UDP from port 53, so nothing else is read),
+and on every platform it looks up exact domains named in rules once a minute. Connections show the
+domain the app looked up. Encrypted DNS (DNS over HTTPS, used by some browsers) can't be seen, so
+those lookups stay unnamed; a domain rule with no known address yet applies to nothing.
 
 Localhost traffic is never counted or policed unless the daemon runs with `--include-loopback`. It
 never reaches your ISP, and throttling it breaks local apps.
@@ -308,7 +317,7 @@ pages).
 
 See [docs/ROADMAP.md](docs/ROADMAP.md). The big ones: enforcement in eBPF (instant classification,
 true shaping and priorities), a Windows packet driver for download limits and UDP counts,
-ask-on-first-connection firewall prompts, domain rules from DNS answers, and network profiles.
+per-network rule profiles, and fingerprint-pinned rules.
 
 ## Development
 

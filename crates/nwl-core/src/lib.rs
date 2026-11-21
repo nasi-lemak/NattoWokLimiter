@@ -7,6 +7,7 @@
 //! * [`rate`]: parsing and formatting of sizes and rates.
 //! * [`remotes`]: bytes per remote address per application.
 //! * [`history`]: long-term traffic history per minute and hour.
+//! * [`dns`]: domain names of remote addresses, from DNS answers.
 //! * [`network`]: the current network (metered or not) and rules that depend on it.
 //! * [`presets`]: ready-made rule sets.
 //! * [`spikes`]: traffic spike detection per application.
@@ -14,6 +15,7 @@
 
 pub mod accounting;
 pub mod api;
+pub mod dns;
 pub mod history;
 pub mod model;
 pub mod network;

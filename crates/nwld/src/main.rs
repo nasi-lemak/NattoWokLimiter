@@ -131,6 +131,51 @@ fn run_engine(
     }
 }
 
+/// Fills the DNS cache: answers seen on the network (Linux, as root), and
+/// direct lookups of the domains rules name, so domain rules also work
+/// where answers can't be watched. The demo gets its made-up answers.
+fn start_dns(engine: &Arc<Mutex<Engine>>, demo: bool) -> anyhow::Result<()> {
+    let cache = engine.lock().unwrap_or_else(|p| p.into_inner()).dns_cache();
+    let now = || chrono::Utc::now().timestamp();
+    if demo {
+        let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+        for answer in nwl_platform::sim::demo_dns() {
+            c.insert(&answer, now());
+        }
+    } else {
+        #[cfg(target_os = "linux")]
+        match nwl_platform::linux::dnswatch::DnsWatcher::open() {
+            Ok(watcher) => {
+                let cache = cache.clone();
+                std::thread::Builder::new().name("dns".into()).spawn(move || {
+                    let err = watcher.run(|answers| {
+                        let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+                        for a in &answers {
+                            c.insert(a, now());
+                        }
+                    });
+                    tracing::warn!("stopped watching DNS answers: {err}");
+                })?;
+            }
+            Err(e) => tracing::info!("not watching DNS answers ({e}); domain names need root"),
+        }
+    }
+    let engine = engine.clone();
+    std::thread::Builder::new().name("domains".into()).spawn(move || loop {
+        let domains = engine.lock().unwrap_or_else(|p| p.into_inner()).rule_domains();
+        for domain in domains {
+            let Ok(ips) = dns_lookup::lookup_host(&domain) else { continue };
+            let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+            for ip in ips {
+                c.insert(&nwl_core::dns::Answer { ip, names: vec![domain.clone()], ttl: 300 }, now());
+            }
+        }
+        cache.lock().unwrap_or_else(|p| p.into_inner()).prune(now());
+        std::thread::sleep(Duration::from_secs(60));
+    })?;
+    Ok(())
+}
+
 /// Polls which network the machine is on. A thread of its own: detection
 /// talks to D-Bus or WinRT and must not delay traffic sampling. Changes take
 /// effect at the next tick.
@@ -225,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
         let engine = engine.clone();
         std::thread::Builder::new().name("network".into()).spawn(move || watch_network(&engine, network))?;
     }
+    start_dns(&engine, args.demo)?;
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let state =

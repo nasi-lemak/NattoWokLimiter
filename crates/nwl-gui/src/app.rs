@@ -90,6 +90,8 @@ struct RuleForm {
     app: String,
     remote: String,
     ports: String,
+    /// Remote domains, comma-separated.
+    domains: String,
     protocol: Option<Protocol>,
     days: [bool; 7],
     from: String,
@@ -119,6 +121,7 @@ impl Default for RuleForm {
             app: String::new(),
             remote: String::new(),
             ports: String::new(),
+            domains: String::new(),
             protocol: None,
             days: [false; 7],
             from: String::new(),
@@ -183,6 +186,7 @@ impl RuleForm {
         f.protocol = m.protocol;
         f.remote = m.remote.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
         f.ports = m.remote_ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+        f.domains = m.domains.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
         if let Some(s) = &rule.schedule {
             for (i, day) in Day::ALL.iter().enumerate() {
                 f.days[i] = s.days.contains(day);
@@ -224,6 +228,10 @@ impl RuleForm {
         let ports = split_list(&self.ports);
         if !ports.is_empty() {
             m.insert("remote_ports".into(), json!(ports));
+        }
+        let domains = split_list(&self.domains);
+        if !domains.is_empty() {
+            m.insert("domains".into(), json!(domains));
         }
         let opt_rate = |s: &str| -> Result<Option<u64>, String> {
             if s.trim().is_empty() {
@@ -1101,6 +1109,7 @@ impl NwlApp {
                         c.conn.key.local.to_string(),
                         c.conn.key.remote.map(|r| r.to_string()).unwrap_or_default(),
                         c.remote_host.clone().unwrap_or_default(),
+                        c.domain.clone().unwrap_or_default(),
                         c.conn.key.protocol.to_string(),
                     ]
                     .iter()
@@ -1343,6 +1352,13 @@ impl NwlApp {
                 ui.add(egui::TextEdit::singleline(&mut f.remote).hint_text("10.0.0.0/8, 2001:db8::/32"));
                 ui.label("Remote ports");
                 ui.add(egui::TextEdit::singleline(&mut f.ports).hint_text("443, 8000-8100"));
+                ui.end_row();
+
+                ui.label("Domains");
+                ui.add(egui::TextEdit::singleline(&mut f.domains).hint_text("example.com, *.ads.example"))
+                    .on_hover_text(
+                        "A domain includes its subdomains. Matched by the addresses DNS answers gave for it.",
+                    );
                 ui.end_row();
 
                 ui.label("Active on");
@@ -2319,14 +2335,22 @@ impl NwlApp {
             ConnAction::BlockHost(c, just_app) => {
                 let Some(remote) = c.conn.key.remote else { return };
                 let ip = remote.ip();
-                let net = if ip.is_ipv4() { format!("{ip}/32") } else { format!("{ip}/128") };
-                let host = c.remote_host.clone().unwrap_or_else(|| ip.to_string());
-                let app_name = c.name.clone().unwrap_or_else(|| "this app".into());
-                let (name, matcher) = match (&c.app, just_app) {
-                    (Some(app), true) => {
-                        (format!("Block {host} for {app_name}"), json!({"app": app.0, "remote": [net]}))
+                // By domain when the app looked one up: it keeps working as
+                // the domain's addresses change. Else by address.
+                let (host, mut matcher) = match &c.domain {
+                    Some(d) => (d.clone(), json!({"domains": [d]})),
+                    None => {
+                        let net = if ip.is_ipv4() { format!("{ip}/32") } else { format!("{ip}/128") };
+                        (c.remote_host.clone().unwrap_or_else(|| ip.to_string()), json!({"remote": [net]}))
                     }
-                    _ => (format!("Block {host}"), json!({"remote": [net]})),
+                };
+                let app_name = c.name.clone().unwrap_or_else(|| "this app".into());
+                let name = match (&c.app, just_app) {
+                    (Some(app), true) => {
+                        matcher["app"] = json!(app.0);
+                        format!("Block {host} for {app_name}")
+                    }
+                    _ => format!("Block {host}"),
                 };
                 let rule = json!({"name": name, "match": matcher, "action": {"type": "block"}});
                 self.act("POST", "/api/rules", Some(rule), &name);
@@ -2384,9 +2408,14 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) -> Opti
                         let remote = c.conn.key.remote.map_or("*".into(), |r| r.to_string());
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
-                            match &c.remote_host {
+                            // The domain the app looked up, else the reverse-DNS name.
+                            match c.domain.as_ref().or(c.remote_host.as_ref()) {
                                 Some(h) => {
-                                    ui.label(RichText::new(h).strong()).on_hover_text(h);
+                                    let hover = match (&c.domain, &c.remote_host) {
+                                        (Some(d), Some(r)) if d != r => format!("{d}\nreverse DNS: {r}"),
+                                        _ => h.clone(),
+                                    };
+                                    ui.label(RichText::new(h).strong()).on_hover_text(hover);
                                     ui.label(RichText::new(remote).monospace().small().weak());
                                 }
                                 None => {
@@ -2426,7 +2455,11 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) -> Opti
                     });
                     row.col(|ui| {
                         let Some(remote) = c.conn.key.remote else { return };
-                        let host = c.remote_host.clone().unwrap_or_else(|| remote.ip().to_string());
+                        let host = c
+                            .domain
+                            .clone()
+                            .or(c.remote_host.clone())
+                            .unwrap_or_else(|| remote.ip().to_string());
                         // Keyed by the connection, not the row: rows re-sort
                         // every second, and an open menu must stay with its
                         // connection.
@@ -2804,7 +2837,8 @@ mod tests {
         let rules = [
             r#"{"id":4,"name":"Steam on the hotspot","enabled":false,
                 "match":{"app":"steam","protocol":"tcp","remote":["10.0.0.0/8","2001:db8::/32"],
-                         "remote_ports":[443,"27000-27100"],"local_ports":[5000],"uid":1000},
+                         "remote_ports":[443,"27000-27100"],"local_ports":[5000],"uid":1000,
+                         "domains":["steampowered.com","*.steamcontent.com"]},
                 "action":{"type":"limit","download":1234567,"upload":"1MB/s"},
                 "schedule":{"days":["mon","fri"],"from":"22:00","until":"06:00"},
                 "network":{"metered":true,"names":["Pixel 8","Office"]}}"#,

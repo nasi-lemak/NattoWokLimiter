@@ -23,11 +23,11 @@ trade-offs stay visible.
 
 ## Firewall experience
 
-- **Ask mode.** Hold the first connection of an unknown app and prompt "allow once / always / block"
-  (GlassWire and OpenSnitch style). On Linux that's NFQUEUE or eBPF.
-- **Domain names from DNS answers.** Reverse DNS is done (the UI shows PTR names), but PTR names are
-  often CDN hosts. Snooping the app's own DNS answers would show the name it actually asked for
-  (`api.example.com`), and would let rules match domains (`*.doubleclick.net`).
+- **Ask mode.** Done: new apps are held until answered. Next: hold them from their very first packet
+  (today they are noticed at the next one-second sample), with an eBPF `connect` hook on Linux.
+- **Domain names.** Done: DNS answers name connections and drive domain rules (Linux; exact domains
+  are also looked up directly on every platform). Next: watching DNS on Windows (ETW) and DNS over
+  TCP.
 - **GeoIP and ASN** for connection details and rules ("block this app outside my country").
 - **Profiles.** Schedules and network conditions are done (rules for metered networks or named
   networks, with detection via NetworkManager and Windows connection cost). Next: detection without

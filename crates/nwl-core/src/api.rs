@@ -178,6 +178,9 @@ pub struct ConnView {
     /// Reverse-DNS name of the remote address, once resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_host: Option<String>,
+    /// The domain the app looked up for this address (from DNS answers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     pub app: Option<AppId>,
     pub name: Option<String>,
     pub rate_up: u64,

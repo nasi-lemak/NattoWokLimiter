@@ -13,6 +13,7 @@ use nwl_core::api::{
 use nwl_core::api::{
     AppView, ConnView, EnforcementStatus, Event, EventKind, Overview, RemoteView, UsageDay, UsageEntry,
 };
+use nwl_core::dns::DnsCache;
 use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapshot};
 use nwl_core::network::{Detected, Network, Overrides};
 use nwl_core::quota::{QuotaStatus, QuotaTracker, QuotaUsage};
@@ -22,6 +23,7 @@ use nwl_core::spikes::SpikeDetector;
 use nwl_platform::appinfo::{AppCatalog, AppInfo};
 use nwl_platform::{EnforceReport, Policy};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 const RULES: &str = "rules.json";
 const QUOTAS: &str = "quotas.json";
@@ -67,6 +69,9 @@ pub struct Engine {
     pending: Vec<Prompt>,
     /// Apps allowed "this time": not asked again until nwld restarts.
     allowed_once: std::collections::HashSet<AppId>,
+    /// Names of remote addresses from DNS answers; filled by the DNS
+    /// watcher and forward lookups, read here.
+    dns: Arc<Mutex<DnsCache>>,
     /// Program fingerprints per app, and when each app was last checked.
     identities: BTreeMap<AppId, Fingerprint>,
     hasher: Option<Hasher>,
@@ -136,6 +141,7 @@ fn app_only(rule: &Rule) -> bool {
         && m.remote_ports.is_empty()
         && m.local_ports.is_empty()
         && m.uid.is_none()
+        && m.domains.is_empty()
 }
 
 impl Engine {
@@ -159,6 +165,7 @@ impl Engine {
             pending: Vec::new(),
             allowed_once: Default::default(),
             identities: store.load(IDENTITIES)?.unwrap_or_default(),
+            dns: Arc::default(),
             hasher: None,
             identity_checked: HashMap::new(),
             warned: HashMap::new(),
@@ -192,6 +199,26 @@ impl Engine {
     pub fn add_startup_warning(&mut self, warning: String) {
         self.status.warnings.push(warning.clone());
         self.startup_warnings.push(warning);
+    }
+
+    /// The DNS cache, for the threads that fill it.
+    pub fn dns_cache(&self) -> Arc<Mutex<DnsCache>> {
+        self.dns.clone()
+    }
+
+    /// Domains in rules that can be looked up directly (no wildcard), so
+    /// rules for them work even where DNS answers can't be watched.
+    pub fn rule_domains(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .rules
+            .enabled()
+            .flat_map(|r| r.matcher.domains.iter())
+            .filter(|d| !d.is_glob())
+            .map(|d| d.0.trim().to_ascii_lowercase())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Starts fingerprinting app programs (a worker thread).
@@ -288,6 +315,12 @@ impl Engine {
             None => self.rules.clone(),
         };
         // Apps waiting for an answer are blocked, before any other rule.
+        // Domain rules apply to the addresses their domains resolve to now.
+        {
+            let now = chrono::Utc::now().timestamp();
+            let dns = self.dns.lock().unwrap_or_else(|p| p.into_inner());
+            self.effective.resolve_domains(|patterns| dns.addresses(patterns, now));
+        }
         let waiting = self.pending.iter().enumerate().map(|(i, p)| Rule {
             id: WAITING_RULE_BASE + i as RuleId,
             name: format!("Waiting for your answer: {}", p.name),
@@ -755,6 +788,7 @@ impl Engine {
     }
 
     pub fn connections(&self, app: Option<&str>) -> Vec<ConnView> {
+        let dns = self.dns.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<ConnView> = self
             .snapshot
             .connections
@@ -773,10 +807,15 @@ impl Engine {
                 let (rate_up, rate_down) = self.conn_rates.get(&conn.key).copied().unwrap_or((0, 0));
                 let remote_host =
                     self.resolver.as_ref().zip(conn.key.remote).and_then(|(r, addr)| r.lookup(addr.ip()));
+                let domain = conn.key.remote.and_then(|r| {
+                    let now = chrono::Utc::now().timestamp();
+                    dns.names(r.ip(), now).first().map(|n| n.to_string())
+                });
                 Some(ConnView {
                     conn: conn.clone(),
                     remote_host,
-                    name: app_id.as_ref().map(|a| a.display_name().to_string()),
+                    domain,
+                    name: app_id.as_ref().map(|a| self.app_name(a)),
                     app: app_id,
                     rate_up,
                     rate_down,
@@ -1420,6 +1459,31 @@ mod tests {
         assert_eq!(changes(&e), 1);
         e.ingest(snap(0, 0, 0), at(12));
         assert_eq!(e.apps()[0].sha256.as_deref(), Some("bbb"));
+    }
+
+    #[test]
+    fn domain_rules_follow_dns_answers() {
+        let mut e = Engine::new(temp_store("domains"), 10).unwrap();
+        e.add_rule(
+            serde_json::from_str(r#"{"match":{"domains":["example.com"]},"action":{"type":"block"}}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        assert_eq!(e.policy().rules.enabled().count(), 0, "off until the domain resolves");
+        assert!(!e.connections(None)[0].blocked);
+        assert_eq!(e.rule_domains(), ["example.com"]);
+
+        let answer = nwl_core::dns::Answer {
+            ip: "1.2.3.4".parse().unwrap(),
+            names: vec!["cdn.example.com".into()],
+            ttl: 300,
+        };
+        e.dns_cache().lock().unwrap().insert(&answer, chrono::Utc::now().timestamp());
+        e.ingest(snap(1000, 0, 0), at(12));
+        let conn = &e.connections(None)[0];
+        assert!(conn.blocked, "the app's connection to that address is blocked");
+        assert_eq!(conn.domain.as_deref(), Some("cdn.example.com"));
     }
 
     #[test]

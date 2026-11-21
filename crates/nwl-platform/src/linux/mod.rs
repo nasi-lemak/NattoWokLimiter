@@ -8,6 +8,7 @@
 //!   with `socket cgroupv2` and drops or polices their packets.
 
 mod cgroup;
+pub mod dnswatch;
 pub mod ebpf;
 pub mod netman;
 pub mod nft;
