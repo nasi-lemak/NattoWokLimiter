@@ -71,7 +71,7 @@ impl Track {
         if self.over == 1 {
             self.usual_before = usual;
         }
-        let cooled = self.last_alert_ms.map_or(true, |t| now_ms.saturating_sub(t) >= cfg.cooldown_ms);
+        let cooled = self.last_alert_ms.is_none_or(|t| now_ms.saturating_sub(t) >= cfg.cooldown_ms);
         let alert = self.over == cfg.sustain && cooled;
         if alert {
             self.last_alert_ms = Some(now_ms);

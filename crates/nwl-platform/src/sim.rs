@@ -215,7 +215,7 @@ impl Monitor for SimulatedMonitor {
         self.tick += 1;
 
         // Churn: occasionally replace a connection with a fresh one.
-        if self.tick % 5 == 0 && !self.conns.is_empty() {
+        if self.tick.is_multiple_of(5) && !self.conns.is_empty() {
             let idx = (self.rand() * self.conns.len() as f64) as usize % self.conns.len();
             let old = self.conns.remove(idx);
             let profile = PROFILES.iter().position(|p| p.pid == old.pid).unwrap();
@@ -234,7 +234,7 @@ impl Monitor for SimulatedMonitor {
             let pid = self.conns[i].pid;
             let p = PROFILES.iter().find(|p| p.pid == pid).unwrap();
             let n = p.remotes.len() as f64;
-            let on = p.burst_period == 0 || (self.tick / p.burst_period) % 2 == 0;
+            let on = p.burst_period == 0 || (self.tick / p.burst_period).is_multiple_of(2);
             let wobble = 0.7 + 0.6 * self.rand();
             let spiking = p.spike_every > 0 && self.tick % p.spike_every >= p.spike_every - SPIKE_TICKS;
             let scale = if on { 1.0 } else { 0.05 } * wobble * self.conns[i].weight * dt / n;

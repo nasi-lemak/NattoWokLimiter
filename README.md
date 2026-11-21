@@ -83,7 +83,7 @@ hasn't been run on a Windows machine yet.
 
 ## Quick start
 
-Requirements: Rust 1.80+. On Linux, enforcement needs root, `nft` (nftables) and cgroup v2, which any
+Requirements: Rust 1.95+. On Linux, enforcement needs root, `nft` (nftables) and cgroup v2, which any
 current distribution has. Monitoring works without them.
 
 ```sh

@@ -266,7 +266,7 @@ impl Engine {
         let Some(hasher) = &self.hasher else { return };
         for a in self.accountant.apps() {
             let path = std::path::Path::new(&a.app.0);
-            let due = self.identity_checked.get(&a.app).map_or(true, |t| now - t >= IDENTITY_CHECK_SECS);
+            let due = self.identity_checked.get(&a.app).is_none_or(|t| now - t >= IDENTITY_CHECK_SECS);
             if path.is_absolute() && due {
                 hasher.check(path.to_path_buf());
                 self.identity_checked.insert(a.app.clone(), now);

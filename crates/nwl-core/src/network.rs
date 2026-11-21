@@ -80,7 +80,7 @@ impl NetworkCondition {
     }
 
     pub fn active(&self, network: &Network) -> bool {
-        let metered = self.metered.map_or(true, |m| m == network.metered);
+        let metered = self.metered.is_none_or(|m| m == network.metered);
         let named = self.names.is_empty()
             || network
                 .name

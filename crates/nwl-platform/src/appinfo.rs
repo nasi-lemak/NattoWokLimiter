@@ -191,7 +191,7 @@ impl AppCatalog for DesktopCatalog {
         if !exe.is_absolute() {
             return None;
         }
-        if self.scanned.map_or(true, |t| t.elapsed() > RESCAN) {
+        if self.scanned.is_none_or(|t| t.elapsed() > RESCAN) {
             self.scan();
         }
         let entry = self.find(exe)?.clone();
