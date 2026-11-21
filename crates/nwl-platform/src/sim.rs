@@ -5,7 +5,7 @@
 //! limits and quotas, so the effect of rules is visible in the UI without
 //! root privileges or a supported OS.
 
-use crate::{EnforceReport, Enforcer, Monitor, Policy, Result};
+use crate::{EnforceReport, Enforcer, Error, Monitor, Policy, Result};
 use nwl_core::model::{ConnKey, Connection, InterfaceCounters, ProcessInfo, Protocol, Snapshot, TcpState};
 use nwl_core::rules::{Action, MatchCtx, RuleId, RuleSet};
 use std::collections::HashMap;
@@ -191,6 +191,21 @@ impl SimulatedMonitor {
 impl Monitor for SimulatedMonitor {
     fn name(&self) -> &'static str {
         "simulated (demo data)"
+    }
+
+    /// The demo app reconnects at once, as real apps tend to.
+    fn close(&mut self, key: &ConnKey) -> Result<()> {
+        let i = self
+            .conns
+            .iter()
+            .position(|c| &c.key == key)
+            .ok_or_else(|| Error::Other("the connection is already closed".into()))?;
+        let old = self.conns.remove(i);
+        let profile =
+            PROFILES.iter().position(|p| p.pid == old.pid).expect("demo connections have a profile");
+        let remote = old.key.remote.expect("demo connections have a remote").to_string();
+        self.open(profile, &remote);
+        Ok(())
     }
 
     fn snapshot(&mut self) -> Result<Snapshot> {

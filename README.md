@@ -62,6 +62,7 @@ There are three front ends over the same daemon:
 | Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
 | Edit rules in place, undo deletes (quota usage included), quota progress on each app and in the tray | ✅ | ✅ |
 | Backup and restore of rules and network choices (replace or merge; drop the file on the window) | ✅ | ✅ |
+| Per-connection actions: close it, block its host for the app or for everyone | ✅ (sock_diag destroy) | ⚠️ close: IPv4 TCP only |
 | Apps shown with their own name and icon ("Firefox Web Browser"), from installed `.desktop` entries | ✅ | ❌ (program name, letter icon) |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
@@ -262,6 +263,7 @@ pages).
 | GET | `/api/overview` | system rates, apps, quotas: what the stream sends each tick |
 | GET | `/api/apps` | apps with history |
 | GET | `/api/connections?app=PATH` | sockets with rates and policy decision |
+| POST | `/api/connections/close` | close one connection (body: its `key`) |
 | GET | `/api/system/history` | recent system-wide samples |
 | GET/POST | `/api/rules` | list / create (`?index=N` inserts at a position) |
 | PUT/DELETE | `/api/rules/{id}` | replace / delete |

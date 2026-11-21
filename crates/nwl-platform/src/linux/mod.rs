@@ -147,6 +147,19 @@ impl Monitor for LinuxMonitor {
         self.warnings.clone()
     }
 
+    fn close(&mut self, key: &ConnKey) -> Result<()> {
+        sockdiag::destroy(key).map_err(|e| match e.raw_os_error() {
+            Some(libc::EOPNOTSUPP) => {
+                Error::Unsupported("this kernel can't close connections (no CONFIG_INET_DIAG_DESTROY)".into())
+            }
+            Some(libc::EPERM) | Some(libc::EACCES) => {
+                Error::Other("closing connections needs nwld to run as root".into())
+            }
+            Some(libc::ENOENT) => Error::Other("the connection is already closed".into()),
+            _ => Error::io("closing the connection", e),
+        })
+    }
+
     fn snapshot(&mut self) -> Result<Snapshot> {
         let socks = sockdiag::dump_all().map_err(|e| Error::io("sock_diag dump", e))?;
         let mono_ms = self.start.elapsed().as_millis() as u64;

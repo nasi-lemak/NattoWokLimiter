@@ -114,6 +114,9 @@ fn run_engine(
         loop {
             match wake.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(Wake::Reapply) => apply(&mut lock(), &mut enforcer),
+                Ok(Wake::Close(key, reply)) => {
+                    let _ = reply.send(monitor.close(&key).map_err(|e| e.to_string()));
+                }
                 Ok(Wake::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break 'ticks,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }

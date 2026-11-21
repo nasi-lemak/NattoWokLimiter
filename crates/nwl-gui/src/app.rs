@@ -351,6 +351,10 @@ pub struct NwlApp {
     /// over it: rows keep their place while the user aims at a button.
     app_order: Vec<AppId>,
     freeze_order: bool,
+    /// The same for connections: rows hold still under the pointer and
+    /// while a row's menu is open.
+    conn_order: Vec<nwl_core::model::ConnKey>,
+    freeze_conns: bool,
 }
 
 impl NwlApp {
@@ -393,6 +397,8 @@ impl NwlApp {
             quitting: false,
             app_order: Vec::new(),
             freeze_order: false,
+            conn_order: Vec::new(),
+            freeze_conns: false,
         }
     }
 
@@ -858,7 +864,9 @@ impl NwlApp {
             remotes_table(ui, &remotes);
             ui.add_space(8.0);
             ui.strong("Open connections");
-            conn_table(ui, "detail", &detail, false);
+            if let Some(action) = conn_table(ui, "detail", &detail, false) {
+                self.conn_action(action);
+            }
         }
     }
 
@@ -1057,7 +1065,7 @@ impl NwlApp {
         ui.add_space(4.0);
         let d = lock(&self.data);
         let f = self.conn_filter.to_lowercase();
-        let conns: Vec<ConnView> = d
+        let mut conns: Vec<ConnView> = d
             .connections
             .iter()
             .filter(|c| self.show_listening || c.conn.key.remote.is_some())
@@ -1078,11 +1086,21 @@ impl NwlApp {
             .cloned()
             .collect();
         drop(d);
+        if self.freeze_conns {
+            let pos =
+                |c: &ConnView| self.conn_order.iter().position(|k| *k == c.conn.key).unwrap_or(usize::MAX);
+            conns.sort_by_key(pos);
+        }
+        self.conn_order = conns.iter().map(|c| c.conn.key.clone()).collect();
         if conns.is_empty() {
             ui.add_space(30.0);
             ui.vertical_centered(|ui| ui.weak("No connections."));
-        } else {
-            conn_table(ui, "conns", &conns, true);
+            return;
+        }
+        let table = ui.scope(|ui| conn_table(ui, "conns", &conns, true));
+        self.freeze_conns = ui.rect_contains_pointer(table.response.rect) || ui.ctx().any_popup_open();
+        if let Some(action) = table.inner {
+            self.conn_action(action);
         }
     }
 
@@ -2063,7 +2081,7 @@ fn remotes_table(ui: &mut Ui, remotes: &[nwl_core::api::RemoteView]) {
         .column(Column::exact(50.0))
         .column(Column::exact(140.0))
         .header(22.0, |mut h| {
-            for t in ["HOST", "col_down()", "col_up()", "PORTS", "OPEN", "SHARE"] {
+            for t in ["HOST", "DOWN", "UP", "PORTS", "OPEN", "SHARE"] {
                 h.col(|ui| {
                     ui.weak(RichText::new(t).small().strong());
                 });
@@ -2109,24 +2127,61 @@ fn remotes_table(ui: &mut Ui, remotes: &[nwl_core::api::RemoteView]) {
         });
 }
 
-fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
+/// What the user chose from a connection's menu.
+enum ConnAction {
+    Close(ConnView),
+    /// Block the remote address, for the connection's app or (`false`) all apps.
+    BlockHost(ConnView, bool),
+}
+
+impl NwlApp {
+    fn conn_action(&self, action: ConnAction) {
+        match action {
+            ConnAction::Close(c) => {
+                let what =
+                    c.remote_host.clone().or(c.conn.key.remote.map(|r| r.to_string())).unwrap_or_default();
+                let body = serde_json::to_value(&c.conn.key).ok();
+                self.act("POST", "/api/connections/close", body, &format!("Closed the connection to {what}"));
+            }
+            ConnAction::BlockHost(c, just_app) => {
+                let Some(remote) = c.conn.key.remote else { return };
+                let ip = remote.ip();
+                let net = if ip.is_ipv4() { format!("{ip}/32") } else { format!("{ip}/128") };
+                let host = c.remote_host.clone().unwrap_or_else(|| ip.to_string());
+                let app_name = c.name.clone().unwrap_or_else(|| "this app".into());
+                let (name, matcher) = match (&c.app, just_app) {
+                    (Some(app), true) => {
+                        (format!("Block {host} for {app_name}"), json!({"app": app.0, "remote": [net]}))
+                    }
+                    _ => (format!("Block {host}"), json!({"remote": [net]})),
+                };
+                let rule = json!({"name": name, "match": matcher, "action": {"type": "block"}});
+                self.act("POST", "/api/rules", Some(rule), &name);
+            }
+        }
+    }
+}
+
+/// The connections table; returns what was chosen from a row's menu.
+fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) -> Option<ConnAction> {
+    let mut action = None;
     let mut t = TableBuilder::new(ui)
         .id_salt(id)
         .striped(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
     if with_app {
-        t = t.column(Column::exact(150.0).clip(true));
+        t = t.column(Column::exact(130.0).clip(true));
     }
     t.column(Column::exact(45.0))
-        .column(Column::exact(190.0).clip(true))
-        .column(Column::remainder().at_least(220.0).clip(true))
-        .column(Column::exact(90.0))
+        .column(Column::exact(175.0).clip(true))
+        .column(Column::remainder().at_least(200.0).clip(true))
+        .column(Column::exact(85.0))
         .columns(Column::exact(90.0), 2)
         .column(Column::exact(65.0))
-        .column(Column::exact(130.0).clip(true))
+        .column(Column::exact(110.0).clip(true))
+        .column(Column::exact(36.0))
         .header(22.0, |mut h| {
-            let titles: &[&str] =
-                &["PROTO", "LOCAL", "REMOTE", "STATE", "col_down()", "col_up()", "RTT", "POLICY"];
+            let titles: &[&str] = &["PROTO", "LOCAL", "REMOTE", "STATE", "DOWN", "UP", "RTT", "POLICY", ""];
             if with_app {
                 h.col(|ui| {
                     ui.weak(RichText::new("APP").small().strong());
@@ -2196,9 +2251,42 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
                             ui.weak(format!("allowed #{r}"));
                         }
                     });
+                    row.col(|ui| {
+                        let Some(remote) = c.conn.key.remote else { return };
+                        let host = c.remote_host.clone().unwrap_or_else(|| remote.ip().to_string());
+                        // Keyed by the connection, not the row: rows re-sort
+                        // every second, and an open menu must stay with its
+                        // connection.
+                        ui.push_id(&c.conn.key, |ui| {
+                            ui.menu_button("⋯", |ui| {
+                                ui.label(RichText::new(&host).strong());
+                                ui.separator();
+                                if ui.button("Close this connection").clicked() {
+                                    action = Some(ConnAction::Close(c.clone()));
+                                    ui.close();
+                                }
+                                if c.app.is_some() {
+                                    let app = c.name.as_deref().unwrap_or("this app");
+                                    if ui.button(format!("Block {host} for {app}")).clicked() {
+                                        action = Some(ConnAction::BlockHost(c.clone(), true));
+                                        ui.close();
+                                    }
+                                }
+                                if ui.button(format!("Block {host} for all apps")).clicked() {
+                                    action = Some(ConnAction::BlockHost(c.clone(), false));
+                                    ui.close();
+                                }
+                                if ui.button("Copy the address").clicked() {
+                                    ui.ctx().copy_text(remote.to_string());
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
                 });
             }
         });
+    action
 }
 
 /// The apps offered in the tray: every app with a one-click block or limit

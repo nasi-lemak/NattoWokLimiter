@@ -16,6 +16,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use nwl_core::model::ConnKey;
 use nwl_core::rules::{Rule, RuleError};
 use serde::Deserialize;
 use serde_json::json;
@@ -33,10 +34,13 @@ mod web {
 pub const CLIENT_HEADER: &str = "x-nwl-client";
 
 /// Messages from the API to the engine thread.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Wake {
     /// Rules changed: re-apply enforcement now instead of at the next tick.
     Reapply,
+    /// Close a connection (the monitor lives on the engine thread); the
+    /// outcome goes back on the channel.
+    Close(ConnKey, mpsc::Sender<Result<(), String>>),
     Shutdown,
 }
 
@@ -61,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/overview", get(overview))
         .route("/api/apps", get(apps))
         .route("/api/connections", get(connections))
+        .route("/api/connections/close", post(close_connection))
         .route("/api/system/history", get(system_history))
         .route("/api/rules", get(list_rules).post(add_rule))
         .route("/api/rules/:id", put(replace_rule).delete(remove_rule))
@@ -319,6 +324,20 @@ async fn import(
     }
 }
 
+/// Closes one connection; the app sees it reset.
+async fn close_connection(State(s): State<AppState>, Json(key): Json<ConnKey>) -> Response {
+    let (tx, rx) = mpsc::channel();
+    if s.wake.send(Wake::Close(key, tx)).is_err() {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "nwld is shutting down");
+    }
+    let reply = tokio::task::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(5))).await;
+    match reply {
+        Ok(Ok(Ok(()))) => Json(json!({ "closed": true })).into_response(),
+        Ok(Ok(Err(e))) => error(StatusCode::CONFLICT, &e),
+        _ => error(StatusCode::GATEWAY_TIMEOUT, "closing the connection timed out"),
+    }
+}
+
 #[derive(Deserialize)]
 struct IconQuery {
     app: String,
@@ -557,6 +576,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closing_goes_through_the_engine_thread() {
+        let (app, wake) = app();
+        // Stands in for the engine thread: closes one known connection.
+        std::thread::spawn(move || {
+            while let Ok(msg) = wake.recv() {
+                if let Wake::Close(key, reply) = msg {
+                    let ok = key.local.port() == 5000;
+                    let _ =
+                        reply.send(if ok { Ok(()) } else { Err("the connection is already closed".into()) });
+                }
+            }
+        });
+        let key = |port: u16| {
+            format!(r#"{{"protocol":"tcp","local":"10.0.0.2:{port}","remote":"1.2.3.4:443","cookie":7}}"#)
+        };
+        let (code, _) = call(&app, "POST", "/api/connections/close", "localhost", false, &key(5000)).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "needs the client header");
+        let (code, body) = call(&app, "POST", "/api/connections/close", "localhost", true, &key(5000)).await;
+        assert_eq!((code, body["closed"].clone()), (StatusCode::OK, json!(true)));
+        let (code, body) = call(&app, "POST", "/api/connections/close", "localhost", true, &key(6000)).await;
+        assert_eq!(
+            (code, body["error"].as_str()),
+            (StatusCode::CONFLICT, Some("the connection is already closed"))
+        );
+    }
+
+    #[tokio::test]
     async fn network_override() {
         let (app, wake) = app();
         let (code, view) = call(&app, "GET", "/api/network", "localhost", false, "").await;
@@ -567,7 +613,7 @@ mod tests {
         let (code, view) = call(&app, "PUT", "/api/network", "localhost", true, r#"{"metered":true}"#).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!((view["metered"].clone(), view["overridden"].clone()), (json!(true), json!(true)));
-        assert_eq!(wake.try_recv(), Ok(Wake::Reapply), "rules are re-applied at once");
+        assert!(matches!(wake.try_recv(), Ok(Wake::Reapply)), "rules are re-applied at once");
         let (_, view) = call(&app, "PUT", "/api/network", "localhost", true, r#"{"metered":null}"#).await;
         assert_eq!((view["metered"].clone(), view.get("overridden")), (json!(false), None));
     }
@@ -584,7 +630,7 @@ mod tests {
         let (code, body) = call(&app, "POST", "/api/rules", "localhost:7657", true, rule).await;
         assert_eq!(code, StatusCode::CREATED);
         assert_eq!(body["id"], 1);
-        assert_eq!(wake.try_recv(), Ok(Wake::Reapply));
+        assert!(matches!(wake.try_recv(), Ok(Wake::Reapply)));
 
         let bad = r#"{"action":{"type":"limit"}}"#;
         let (code, body) = call(&app, "POST", "/api/rules", "localhost", true, bad).await;
@@ -611,7 +657,7 @@ mod tests {
         assert_eq!(code, StatusCode::FORBIDDEN, "pausing needs the CSRF header too");
         let (code, status) = call(&app, "POST", "/api/pause", "localhost", true, r#"{"paused":true}"#).await;
         assert_eq!((code, status["paused"].as_bool()), (StatusCode::OK, Some(true)));
-        assert_eq!(wake.try_recv(), Ok(Wake::Reapply));
+        assert!(matches!(wake.try_recv(), Ok(Wake::Reapply)));
     }
 
     #[tokio::test]

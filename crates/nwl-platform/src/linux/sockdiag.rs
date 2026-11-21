@@ -7,6 +7,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
+const SOCK_DESTROY: u16 = 21;
 const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 const NLMSG_HDRLEN: usize = 16;
@@ -164,6 +165,73 @@ fn dump(
     }
 }
 
+/// Closes one socket: the kernel aborts it as if the network reset it
+/// (`ss -K`). Needs `CAP_NET_ADMIN` and a kernel built with
+/// `CONFIG_INET_DIAG_DESTROY`, which distribution kernels have.
+pub fn destroy(key: &ConnKey) -> io::Result<()> {
+    let remote = key.remote.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a connection"))?;
+    let family = if key.local.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 } as u8;
+    let ipproto = match key.protocol {
+        Protocol::Tcp => libc::IPPROTO_TCP,
+        Protocol::Udp => libc::IPPROTO_UDP,
+    } as u8;
+    let mut req = [0u8; NLMSG_HDRLEN + 56];
+    let len = req.len() as u32;
+    req[0..4].copy_from_slice(&len.to_ne_bytes());
+    req[4..6].copy_from_slice(&SOCK_DESTROY.to_ne_bytes());
+    let flags = (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16;
+    req[6..8].copy_from_slice(&flags.to_ne_bytes());
+    req[8..12].copy_from_slice(&1u32.to_ne_bytes());
+    req[16] = family;
+    req[17] = ipproto;
+    req[20..24].copy_from_slice(&u32::MAX.to_ne_bytes()); // any state
+                                                          // inet_diag_sockid: ports (big endian), addresses, interface, cookie.
+    let id = &mut req[24..72];
+    id[0..2].copy_from_slice(&key.local.port().to_be_bytes());
+    id[2..4].copy_from_slice(&remote.port().to_be_bytes());
+    let put = |slot: &mut [u8], ip: IpAddr| match ip {
+        IpAddr::V4(a) => slot[..4].copy_from_slice(&a.octets()),
+        IpAddr::V6(a) => slot.copy_from_slice(&a.octets()),
+    };
+    put(&mut id[4..20], key.local.ip());
+    put(&mut id[20..36], remote.ip());
+    id[40..44].copy_from_slice(&(key.cookie as u32).to_ne_bytes());
+    id[44..48].copy_from_slice(&((key.cookie >> 32) as u32).to_ne_bytes());
+
+    let nl = Netlink::open()?;
+    // SAFETY: sockaddr_nl is plain data; zeroed is a valid value.
+    let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    addr.nl_family = libc::AF_NETLINK as u16;
+    // SAFETY: buffers and lengths are valid for the duration of the calls.
+    let sent = unsafe {
+        libc::sendto(
+            nl.0,
+            req.as_ptr().cast(),
+            req.len(),
+            0,
+            (&addr as *const libc::sockaddr_nl).cast(),
+            std::mem::size_of::<libc::sockaddr_nl>() as u32,
+        )
+    };
+    if sent < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buf = [0u8; 512];
+    // SAFETY: buf is valid for writes of buf.len() bytes.
+    let n = unsafe { libc::recv(nl.0, buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let msg = &buf[..n as usize];
+    if msg.len() >= NLMSG_HDRLEN + 4 && u16::from_ne_bytes([msg[4], msg[5]]) == NLMSG_ERROR {
+        let errno = i32::from_ne_bytes(msg[16..20].try_into().unwrap());
+        if errno != 0 {
+            return Err(io::Error::from_raw_os_error(-errno));
+        }
+    }
+    Ok(())
+}
+
 fn parse_addr(family: u8, bytes: &[u8], port: u16) -> SocketAddr {
     let ip = if family == libc::AF_INET as u8 {
         IpAddr::V4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
@@ -238,6 +306,34 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn destroys_a_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(server_addr).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let socks = match dump_all() {
+            Ok(s) => s,
+            Err(e) => return crate::linux::skip_unless_required(&format!("sock_diag: {e}")),
+        };
+        let local = client.local_addr().unwrap();
+        let key = socks.iter().find(|s| s.key.local == local).expect("client socket listed").key.clone();
+        match destroy(&key) {
+            Ok(()) => {}
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP)) => {
+                return crate::linux::skip_unless_required(&format!("SOCK_DESTROY: {e}"));
+            }
+            Err(e) => panic!("destroy: {e}"),
+        }
+        // The app sees its connection aborted.
+        let mut buf = [0u8; 1];
+        let read = client.read(&mut buf);
+        assert!(matches!(read, Err(_) | Ok(0)), "{read:?}");
+        let socks = dump_all().unwrap();
+        assert!(!socks.iter().any(|s| s.key.local == local && s.state == Some(TcpState::Established)));
+        assert_eq!(destroy(&key).unwrap_err().raw_os_error(), Some(libc::ENOENT), "already gone");
+    }
 
     #[test]
     fn reports_bytes_of_a_local_tcp_connection() {

@@ -16,7 +16,7 @@
 //! [`network`] detects which network the machine is on and whether it is
 //! metered.
 
-use nwl_core::model::{AppId, Snapshot};
+use nwl_core::model::{AppId, ConnKey, Snapshot};
 use nwl_core::rules::{Action, RuleId, RuleSet};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -58,6 +58,12 @@ pub trait Monitor: Send {
     /// Degraded capabilities worth telling the user about.
     fn warnings(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Closes a connection (the kernel aborts it; the app sees a reset).
+    fn close(&mut self, key: &ConnKey) -> Result<()> {
+        let _ = key;
+        Err(Error::Unsupported("closing connections isn't supported on this system".into()))
     }
 }
 

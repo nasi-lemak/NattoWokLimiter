@@ -276,6 +276,30 @@ impl Monitor for WindowsMonitor {
         "windows (IP Helper + TCP EStats)"
     }
 
+    /// Resets a TCP connection (`SetTcpEntry` with `DELETE_TCB`). Windows
+    /// offers this for IPv4 TCP only; it needs Administrator.
+    fn close(&mut self, key: &ConnKey) -> Result<()> {
+        let (SocketAddr::V4(local), Some(SocketAddr::V4(remote))) = (key.local, key.remote) else {
+            return Err(Error::Unsupported("Windows can only close IPv4 TCP connections".into()));
+        };
+        if key.protocol != Protocol::Tcp {
+            return Err(Error::Unsupported("Windows can only close TCP connections".into()));
+        }
+        let row = MIB_TCPROW_LH {
+            Anonymous: MIB_TCPROW_LH_0 { State: MIB_TCP_STATE_DELETE_TCB },
+            dwLocalAddr: u32::from_ne_bytes(local.ip().octets()),
+            dwLocalPort: local.port().to_be() as u32,
+            dwRemoteAddr: u32::from_ne_bytes(remote.ip().octets()),
+            dwRemotePort: remote.port().to_be() as u32,
+        };
+        // SAFETY: `row` is a valid, initialized MIB_TCPROW for the call.
+        match unsafe { SetTcpEntry(&row) } {
+            NO_ERROR => Ok(()),
+            5 => Err(Error::Other("closing connections needs Administrator".into())), // ERROR_ACCESS_DENIED
+            code => Err(Error::Other(format!("closing the connection failed (error {code})"))),
+        }
+    }
+
     fn snapshot(&mut self) -> Result<Snapshot> {
         let mut snap = Snapshot { mono_ms: self.start.elapsed().as_millis() as u64, ..Default::default() };
         let mut live = HashSet::new();
