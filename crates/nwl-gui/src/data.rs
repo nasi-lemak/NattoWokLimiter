@@ -48,6 +48,8 @@ pub struct Data {
     pub toast: Option<(String, bool, Instant)>,
     /// Outcome of the last rule-form submission, for the form to pick up.
     pub rule_form_result: Option<Result<(), String>>,
+    /// The "Undo" for the toast shown at that instant.
+    pub toast_undo: Option<(Instant, Call)>,
     last_mono: u64,
     last_event: u64,
     primed: bool,
@@ -87,6 +89,7 @@ pub enum Request {
 }
 
 /// An API call made for the user, with what to say when it worked.
+#[derive(Clone)]
 pub struct Call {
     pub method: &'static str,
     pub path: String,
@@ -94,6 +97,8 @@ pub struct Call {
     pub done: String,
     /// The rule form waits for this call's outcome (errors show in the form).
     pub rule_form: bool,
+    /// What reverses this call, offered as "Undo" once it worked.
+    pub undo: Option<Box<Call>>,
 }
 
 impl Call {
@@ -103,7 +108,7 @@ impl Call {
         body: Option<Value>,
         done: impl Into<String>,
     ) -> Self {
-        Self { method, path: path.into(), body, done: done.into(), rule_form: false }
+        Self { method, path: path.into(), body, done: done.into(), rule_form: false, undo: None }
     }
 }
 
@@ -130,9 +135,13 @@ fn run_action(client: &Client, data: &Shared, app: AppId, name: String, action: 
 async fn run_call(client: &Client, data: &Shared, call: Call) {
     let result = client.call(call.method, &call.path, call.body).await;
     let mut d = lock(data);
+    let now = Instant::now();
     match &result {
-        Ok(_) => d.toast = Some((call.done, true, Instant::now())),
-        Err(e) if !call.rule_form => d.toast = Some((e.clone(), false, Instant::now())),
+        Ok(_) => {
+            d.toast = Some((call.done, true, now));
+            d.toast_undo = call.undo.map(|undo| (now, *undo));
+        }
+        Err(e) if !call.rule_form => d.toast = Some((e.clone(), false, now)),
         Err(_) => {}
     }
     if call.rule_form {

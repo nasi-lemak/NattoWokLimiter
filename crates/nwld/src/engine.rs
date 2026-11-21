@@ -12,7 +12,7 @@ use nwl_core::api::{
 };
 use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapshot};
 use nwl_core::network::{Detected, Network, Overrides};
-use nwl_core::quota::{QuotaStatus, QuotaTracker};
+use nwl_core::quota::{QuotaStatus, QuotaTracker, QuotaUsage};
 use nwl_core::remotes::{RemoteStats, RemoteTracker};
 use nwl_core::rules::{Action, Day, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
 use nwl_core::spikes::SpikeDetector;
@@ -69,6 +69,9 @@ pub struct Engine {
     /// A representative process per app, for matching app patterns.
     app_samples: HashMap<AppId, ProcessInfo>,
     exhausted: Vec<RuleId>,
+    /// Recently deleted quota rules and their usage, so that undoing a
+    /// delete (re-adding the identical rule) keeps what was counted.
+    removed_quotas: VecDeque<(Rule, QuotaUsage)>,
     events: VecDeque<Event>,
     next_event_id: u64,
     pub status: EnforcementStatus,
@@ -141,6 +144,7 @@ impl Engine {
             conn_rates: HashMap::new(),
             app_samples: HashMap::new(),
             exhausted: Vec::new(),
+            removed_quotas: VecDeque::new(),
             events: VecDeque::new(),
             // Event ids keep increasing across restarts (clients poll with
             // `after=<last id seen>`), with room for a million events a second.
@@ -389,7 +393,19 @@ impl Engine {
     }
 
     pub fn add_rule(&mut self, rule: Rule) -> Result<RuleId, RuleError> {
+        // The same quota rule coming back (an undo) gets its usage back.
+        let removed = self.removed_quotas.iter().position(|(r, _)| {
+            r.id == rule.id
+                && r.matcher == rule.matcher
+                && r.action == rule.action
+                && r.schedule == rule.schedule
+        });
         let id = self.rules.add(rule)?;
+        if let Some((old, usage)) = removed.and_then(|i| self.removed_quotas.remove(i)) {
+            if old.id == id {
+                self.quotas.restore(id, usage);
+            }
+        }
         self.rules_changed();
         let name = self.rules.get(id).map(|r| r.name.clone()).unwrap_or_default();
         self.push_event(EventKind::RuleAdded { rule: id, name });
@@ -406,6 +422,12 @@ impl Engine {
 
     pub fn remove_rule(&mut self, id: RuleId) -> Result<Rule, RuleError> {
         let rule = self.rules.remove(id)?;
+        if let Some(usage) = self.quotas.take(id) {
+            if self.removed_quotas.len() == 16 {
+                self.removed_quotas.pop_front();
+            }
+            self.removed_quotas.push_back((rule.clone(), usage));
+        }
         self.rules_changed();
         self.push_event(EventKind::RuleRemoved { rule: id, name: rule.name.clone() });
         Ok(rule)
@@ -997,6 +1019,34 @@ mod tests {
         e.set_network("test", Detected { name: Some("Cafe".into()), metered: Some(true) });
         assert!(e.network_view().metered, "other networks follow detection");
         assert_eq!(e.overview().network.name.as_deref(), Some("Cafe"));
+    }
+
+    #[test]
+    fn undoing_a_quota_delete_keeps_its_usage() {
+        let mut e = Engine::new(temp_store("undo-quota"), 10).unwrap();
+        let quota: Rule = serde_json::from_str(
+            r#"{"match":{"app":"steam"},"action":{"type":"quota","limit":10000,"period":"day"}}"#,
+        )
+        .unwrap();
+        let id = e.add_rule(quota).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        e.ingest(snap(1000, 0, 4000), at(12));
+        assert_eq!(e.quota_status()[0].used, 4000);
+        let removed = e.remove_rule(id).unwrap();
+        assert!(e.quota_status().is_empty());
+        assert_eq!(e.add_rule(removed).unwrap(), id, "same id back");
+        assert_eq!(e.quota_status()[0].used, 4000, "usage restored");
+
+        // A different rule that happens to get the same id starts from zero.
+        let removed = e.remove_rule(id).unwrap();
+        let mut other = removed.clone();
+        other.action = Action::Quota {
+            limit: nwl_core::rate::ByteSize(99),
+            period: Period::Day,
+            direction: Direction::Both,
+        };
+        e.add_rule(other).unwrap();
+        assert_eq!(e.quota_status()[0].used, 0);
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub struct TrayApp {
     pub up: u64,
     /// The current one-click limit (download and upload), bytes/s.
     pub limit: Option<u64>,
+    /// Its quota, e.g. "1.20 GB of 5.00 GB today".
+    pub quota: Option<String>,
 }
 
 /// What the tray shows.
@@ -145,7 +147,11 @@ fn app_menu(a: &TrayApp) -> Entry {
     } else if let Some(l) = a.limit {
         label += &format!(" (limited to {})", rate(l));
     }
-    let mut children = vec![Entry::Info(format!("↓ {}   ↑ {}", rate(a.down), rate(a.up))), Entry::Separator];
+    let mut children = vec![Entry::Info(format!("↓ {}   ↑ {}", rate(a.down), rate(a.up)))];
+    if let Some(quota) = &a.quota {
+        children.push(Entry::Info(format!("Quota: {quota}")));
+    }
+    children.push(Entry::Separator);
     children.push(match t.block_rule {
         Some(_) => Entry::action("Unblock", cmd(QuickAction::Unblock)),
         None => Entry::action("Block", cmd(QuickAction::Block)),
@@ -624,6 +630,7 @@ mod tests {
             down: 1_000_000,
             up: 0,
             limit: limit.map(|_| 1_000_000),
+            quota: None,
         };
         let state = TrayState {
             connected: true,

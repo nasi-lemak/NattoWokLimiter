@@ -220,8 +220,20 @@ async fn list_rules(State(s): State<AppState>) -> impl IntoResponse {
     Json(s.engine().rules.rules.clone())
 }
 
-async fn add_rule(State(s): State<AppState>, Json(rule): Json<Rule>) -> Response {
-    let result = s.engine().add_rule(rule);
+#[derive(Deserialize)]
+struct AddQuery {
+    /// Insert at this position instead of at the end (e.g. to undo a delete).
+    index: Option<usize>,
+}
+
+async fn add_rule(State(s): State<AppState>, Query(q): Query<AddQuery>, Json(rule): Json<Rule>) -> Response {
+    let result = {
+        let mut engine = s.engine();
+        engine.add_rule(rule).and_then(|id| match q.index {
+            Some(index) => engine.move_rule(id, index).map(|()| id),
+            None => Ok(id),
+        })
+    };
     match result {
         Ok(id) => {
             s.reapply();
@@ -461,6 +473,21 @@ mod tests {
         for bad in ["evil.com", "127.0.0.1.evil.com:80", "", "[::2]:1", "localhost.evil:1"] {
             assert!(!is_loopback_host(bad), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn rules_can_be_inserted_at_a_position() {
+        let (app, _wake) = app();
+        for name in ["a", "b"] {
+            let rule = format!(r#"{{"name":"{name}","action":{{"type":"allow"}}}}"#);
+            call(&app, "POST", "/api/rules", "localhost", true, &rule).await;
+        }
+        let rule = r#"{"name":"restored","action":{"type":"allow"}}"#;
+        let (code, _) = call(&app, "POST", "/api/rules?index=0", "localhost", true, rule).await;
+        assert_eq!(code, StatusCode::CREATED);
+        let (_, rules) = call(&app, "GET", "/api/rules", "localhost", false, "").await;
+        let names: Vec<_> = rules.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["restored", "a", "b"]);
     }
 
     #[tokio::test]

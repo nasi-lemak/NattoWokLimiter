@@ -72,6 +72,15 @@ impl QuotaTracker {
     pub fn retain_rules(&mut self, rules: &RuleSet) {
         self.usage.retain(|id, _| rules.get(*id).is_some());
     }
+
+    /// Removes and returns a rule's usage (to restore it if the rule comes back).
+    pub fn take(&mut self, rule: RuleId) -> Option<QuotaUsage> {
+        self.usage.remove(&rule)
+    }
+
+    pub fn restore(&mut self, rule: RuleId, usage: QuotaUsage) {
+        self.usage.insert(rule, usage);
+    }
 }
 
 #[cfg(test)]

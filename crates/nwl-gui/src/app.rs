@@ -9,7 +9,7 @@ use nwl_core::api::{AppView, ConnView, EventKind};
 use nwl_core::history::Range;
 use nwl_core::model::{AppId, Direction, Protocol};
 use nwl_core::rate::{format_bytes, ByteSize, Rate};
-use nwl_core::rules::{Day, Period, Rule, TimeOfDay};
+use nwl_core::rules::{Action, Day, Period, Rule, TimeOfDay};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
@@ -98,6 +98,9 @@ struct RuleForm {
     metered: Option<bool>,
     /// Only on networks with these names (comma-separated).
     networks: String,
+    /// The rule being edited; saving replaces it. Fields the form doesn't
+    /// show (local ports, user) are kept from it.
+    editing: Option<Rule>,
     error: Option<String>,
 }
 
@@ -122,6 +125,7 @@ impl Default for RuleForm {
             until: String::new(),
             metered: None,
             networks: String::new(),
+            editing: None,
             error: None,
         }
     }
@@ -131,7 +135,68 @@ fn split_list(s: &str) -> Vec<String> {
     s.split([',', ' ']).map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect()
 }
 
+/// A size for a text field: readable when that is exact (`5.00 MB`),
+/// otherwise the exact byte count, so editing never changes a value by itself.
+fn exact_size(bytes: u64) -> String {
+    let pretty = format_bytes(bytes);
+    if pretty.parse::<ByteSize>().is_ok_and(|b| b.0 == bytes) {
+        pretty
+    } else {
+        bytes.to_string()
+    }
+}
+
+fn exact_rate(bytes: u64) -> String {
+    let pretty = format!("{}/s", format_bytes(bytes));
+    if pretty.parse::<Rate>().is_ok_and(|r| r.0 == bytes) {
+        pretty
+    } else {
+        format!("{bytes}B/s")
+    }
+}
+
 impl RuleForm {
+    /// The form filled in from an existing rule, to edit it.
+    fn from_rule(rule: &Rule) -> Self {
+        let mut f =
+            RuleForm { open: true, name: rule.name.clone(), editing: Some(rule.clone()), ..Self::default() };
+        match &rule.action {
+            Action::Allow => f.action = FormAction::Allow,
+            Action::Block { direction } => {
+                f.action = FormAction::Block;
+                f.direction = *direction;
+            }
+            Action::Limit { download, upload } => {
+                f.action = FormAction::Limit;
+                f.download = download.map(|r| exact_rate(r.0)).unwrap_or_default();
+                f.upload = upload.map(|r| exact_rate(r.0)).unwrap_or_default();
+            }
+            Action::Quota { limit, period, direction } => {
+                f.action = FormAction::Quota;
+                f.quota = exact_size(limit.0);
+                f.period = *period;
+                f.quota_direction = *direction;
+            }
+        }
+        let m = &rule.matcher;
+        f.app = m.app.as_ref().map(|a| a.0.clone()).unwrap_or_default();
+        f.protocol = m.protocol;
+        f.remote = m.remote.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+        f.ports = m.remote_ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+        if let Some(s) = &rule.schedule {
+            for (i, day) in Day::ALL.iter().enumerate() {
+                f.days[i] = s.days.contains(day);
+            }
+            f.from = s.from.map(|t| t.to_string()).unwrap_or_default();
+            f.until = s.until.map(|t| t.to_string()).unwrap_or_default();
+        }
+        if let Some(n) = &rule.network {
+            f.metered = n.metered;
+            f.networks = n.names.join(", ");
+        }
+        f
+    }
+
     /// Builds the rule JSON, validating what can be checked locally.
     fn build(&self) -> Result<Value, String> {
         let mut m = serde_json::Map::new();
@@ -182,7 +247,21 @@ impl RuleForm {
                 json!({"type": "quota", "limit": limit.0, "period": self.period, "direction": self.quota_direction})
             }
         };
+        // When editing, keep what the form doesn't show (id, enabled, local
+        // ports, user).
+        if let Some(orig) = &self.editing {
+            if !orig.matcher.local_ports.is_empty() {
+                m.insert("local_ports".into(), json!(orig.matcher.local_ports));
+            }
+            if let Some(uid) = orig.matcher.uid {
+                m.insert("uid".into(), json!(uid));
+            }
+        }
         let mut rule = json!({"name": self.name.trim(), "match": m, "action": action});
+        if let Some(orig) = &self.editing {
+            rule["id"] = json!(orig.id);
+            rule["enabled"] = json!(orig.enabled);
+        }
         let days: Vec<Day> = (0..7).filter(|&i| self.days[i]).map(Day::from_index).collect();
         let (from, until) = (self.from.trim(), self.until.trim());
         if from.is_empty() != until.is_empty() {
@@ -285,8 +364,24 @@ impl NwlApp {
 
     /// Runs one API call in the background; the outcome shows as a toast and
     /// the views refresh.
+    /// Deleting a rule can be undone: the toast offers to put it back, with
+    /// its id, at its place in the list.
     fn act(&self, method: &'static str, path: &str, body: Option<Value>, done: &str) {
-        let _ = self.poller.send(Request::Call(Call::new(method, path, body, done)));
+        let mut call = Call::new(method, path, body, done);
+        if method == "DELETE" {
+            call.undo = self.undo_delete(path).map(Box::new);
+        }
+        let _ = self.poller.send(Request::Call(call));
+    }
+
+    fn undo_delete(&self, path: &str) -> Option<Call> {
+        let id: u64 = path.strip_prefix("/api/rules/")?.parse().ok()?;
+        let d = lock(&self.data);
+        let index = d.rules.iter().position(|r| r.id == id)?;
+        let rule = serde_json::to_value(&d.rules[index]).ok()?;
+        let name =
+            if d.rules[index].name.is_empty() { format!("rule #{id}") } else { d.rules[index].name.clone() };
+        Some(Call::new("POST", format!("/api/rules?index={index}"), Some(rule), format!("Restored {name}")))
     }
 
     /// Pauses or resumes all rules in the daemon.
@@ -415,8 +510,18 @@ impl NwlApp {
             });
     }
 
-    /// The open tab's content.
+    /// The open tab's content, or help when the daemon isn't answering.
     fn tab_content(&mut self, ui: &mut Ui) {
+        let (connected, error) = {
+            let d = lock(&self.data);
+            (d.connected, d.error.clone())
+        };
+        if !connected {
+            if let Some(error) = error {
+                self.disconnected(ui, &error);
+                return;
+            }
+        }
         match self.tab {
             Tab::Apps => {
                 egui::ScrollArea::vertical().id_salt("apps-scroll").show(ui, |ui| self.apps_tab(ui)).inner
@@ -434,6 +539,52 @@ impl NwlApp {
             }
             Tab::Events => self.events_tab(ui),
         }
+    }
+
+    /// Explains that the service isn't answering and how to start it.
+    fn disconnected(&mut self, ui: &mut Ui, error: &str) {
+        ui.add_space(36.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(560.0);
+            ui.heading("Can't reach the NattoWok service");
+            ui.add_space(6.0);
+            ui.label(format!(
+                "This app shows what the nwld service sees and asks it to apply your rules, but nothing \
+                 answers at {}.",
+                self.client.base()
+            ));
+            ui.add_space(10.0);
+            if cfg!(target_arch = "wasm32") {
+                ui.label("nwld stopped after serving this page. Start it again and this page reconnects by itself.");
+            } else if cfg!(windows) {
+                ui.label("Start nwld.exe as Administrator (right-click it, then \"Run as administrator\").");
+            } else if cfg!(target_os = "macos") {
+                ui.label("Start it in a terminal:");
+                ui.code("sudo nwld");
+            } else {
+                ui.label("It normally runs in the background as a system service. Start it here, or in a terminal:");
+                ui.code("sudo systemctl start nwld");
+                ui.add_space(6.0);
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui
+                    .add(egui::Button::new(RichText::new("Start the service").color(col_on_accent())).fill(col_accent()))
+                    .on_hover_text("Asks for your password, then starts nwld.service")
+                    .clicked()
+                {
+                    start_service(self.data.clone());
+                }
+            }
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - 220.0).max(0.0) / 2.0);
+                ui.spinner();
+                ui.weak("Trying again every second…");
+            });
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("Details").id_salt("disconnected-details").show(ui, |ui| {
+                ui.weak(error);
+            });
+        });
     }
 
     fn tabs(&mut self, ui: &mut Ui) {
@@ -555,9 +706,8 @@ impl NwlApp {
                 for (i, a) in apps.iter().enumerate() {
                     body.row(46.0, |mut row| {
                         row.col(|ui| {
-                            let tag = quotas.iter().find(|q| a.rules.contains(&q.rule)).map(|q| {
-                                let color = if q.exhausted { col_bad() } else { col_accent() };
-                                (format!("{} / {}", format_bytes(q.used), format_bytes(q.limit)), color)
+                            let tag = app_quota(&a.rules, &quotas).map(|q| {
+                                (quota_text(q), quota_color(q), Some(q.used as f32 / q.limit.max(1) as f32))
                             });
                             app_cell(ui, &a.name, &a.app.0, a.blocked, tag);
                         });
@@ -948,24 +1098,21 @@ impl NwlApp {
                             ui.label(t);
                             ui.weak(format!("{} · {}", r.action_summary(), r.scope_summary()));
                             if let Some(q) = quotas.iter().find(|q| q.rule == r.id) {
-                                let frac = (q.used as f32 / q.limit.max(1) as f32).min(1.0);
-                                let period = format!("{:?}", q.period).to_lowercase();
-                                let text = format!(
-                                    "{} of {} this {period}",
-                                    format_bytes(q.used),
-                                    format_bytes(q.limit)
-                                );
-                                ui.add(
-                                    egui::ProgressBar::new(frac)
-                                        .desired_width(320.0)
-                                        .fill(if q.exhausted { col_bad() } else { col_accent() })
-                                        .text(text),
-                                );
+                                ui.add_space(3.0);
+                                ui.horizontal(|ui| {
+                                    let frac = q.used as f32 / q.limit.max(1) as f32;
+                                    let color = quota_color(q);
+                                    quota_bar(ui, 220.0, frac, color);
+                                    ui.label(RichText::new(quota_text(q)).small().color(color));
+                                });
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("×").on_hover_text("Delete").clicked() {
                                 op = Some((r.id, "delete", i));
+                            }
+                            if ui.small_button("Edit").clicked() {
+                                op = Some((r.id, "edit", i));
                             }
                             if ui.add_enabled(i + 1 < rules.len(), egui::Button::new("↓").small()).clicked()
                             {
@@ -982,6 +1129,7 @@ impl NwlApp {
         if let Some((id, what, i)) = op {
             let path = format!("/api/rules/{id}");
             match what {
+                "edit" => self.form = RuleForm::from_rule(&rules[i]),
                 "delete" => self.act("DELETE", &path, None, &format!("Deleted rule #{id}")),
                 "up" | "down" => {
                     let index = if what == "up" { i - 1 } else { i + 1 };
@@ -1002,6 +1150,10 @@ impl NwlApp {
         let f = &mut self.form;
         let mut save = false;
         egui::Frame::group(ui.style()).show(ui, |ui| {
+            if let Some(orig) = &f.editing {
+                ui.label(RichText::new(format!("Editing rule #{}", orig.id)).strong());
+                ui.add_space(2.0);
+            }
             egui::Grid::new("rule-form").num_columns(4).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut f.name);
@@ -1126,9 +1278,16 @@ impl NwlApp {
                 Err(e) => self.form.error = Some(e),
                 Ok(rule) => {
                     self.form.error = None;
-                    let call =
-                        Call { rule_form: true, ..Call::new("POST", "/api/rules", Some(rule), "Rule added") };
-                    let _ = self.poller.send(Request::Call(call));
+                    let call = match &self.form.editing {
+                        Some(orig) => Call::new(
+                            "PUT",
+                            format!("/api/rules/{}", orig.id),
+                            Some(rule),
+                            format!("Rule #{} saved", orig.id),
+                        ),
+                        None => Call::new("POST", "/api/rules", Some(rule), "Rule added"),
+                    };
+                    let _ = self.poller.send(Request::Call(Call { rule_form: true, ..call }));
                 }
             }
         }
@@ -1514,9 +1673,6 @@ impl NwlApp {
                 ui.colored_label(col_accent(), w);
             }
         }
-        if let Some(e) = &d.error {
-            ui.colored_label(col_bad(), format!("{e}. Is nwld running? Retrying every second."));
-        }
     }
 }
 
@@ -1594,7 +1750,54 @@ fn direction_combo(ui: &mut Ui, id: &str, dir: &mut Direction) {
         });
 }
 
-fn app_cell(ui: &mut Ui, name: &str, path: &str, blocked: bool, tag: Option<(String, Color32)>) {
+/// The app's quota closest to its cap, if it has any.
+fn app_quota<'a>(
+    rules: &[u64],
+    quotas: &'a [nwl_core::quota::QuotaStatus],
+) -> Option<&'a nwl_core::quota::QuotaStatus> {
+    quotas.iter().filter(|q| rules.contains(&q.rule)).max_by(|a, b| {
+        let frac = |q: &nwl_core::quota::QuotaStatus| q.used as f64 / q.limit.max(1) as f64;
+        frac(a).total_cmp(&frac(b))
+    })
+}
+
+/// Green, amber from 80%, red when used up.
+fn quota_color(q: &nwl_core::quota::QuotaStatus) -> Color32 {
+    if q.exhausted {
+        col_bad()
+    } else if q.used as f64 >= q.limit as f64 * 0.8 {
+        col_accent()
+    } else {
+        col_ok()
+    }
+}
+
+/// A thin rounded progress bar.
+fn quota_bar(ui: &mut Ui, width: f32, frac: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 6.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 3.0, crate::theme::current().surface);
+    let mut fill = rect;
+    fill.set_width((rect.width() * frac.clamp(0.0, 1.0)).max(4.0));
+    ui.painter().rect_filled(fill, 3.0, color);
+}
+
+/// "1.20 GB of 5.00 GB today".
+fn quota_text(q: &nwl_core::quota::QuotaStatus) -> String {
+    let when = match q.period {
+        Period::Day => "today",
+        Period::Week => "this week",
+        Period::Month => "this month",
+    };
+    if q.exhausted {
+        format!("{} used up {when}", format_bytes(q.limit))
+    } else {
+        format!("{} of {} {when}", format_bytes(q.used), format_bytes(q.limit))
+    }
+}
+
+/// An app's icon, name and path; `tag` adds a colored note after the name,
+/// with a small progress bar when it has a fraction (quotas).
+fn app_cell(ui: &mut Ui, name: &str, path: &str, blocked: bool, tag: Option<(String, Color32, Option<f32>)>) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
         let mut color = avatar_color(path);
@@ -1619,7 +1822,10 @@ fn app_cell(ui: &mut Ui, name: &str, path: &str, blocked: bool, tag: Option<(Str
             ui.horizontal(|ui| {
                 // Not selectable, so a click on the name opens the row.
                 ui.add(egui::Label::new(n).selectable(false));
-                if let Some((text, color)) = tag {
+                if let Some((text, color, frac)) = tag {
+                    if let Some(frac) = frac {
+                        quota_bar(ui, 40.0, frac, color);
+                    }
                     ui.label(RichText::new(text).small().color(color));
                 }
             });
@@ -1805,8 +2011,9 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) {
 /// by name so the menu does not reshuffle while it is open.
 fn tray_apps(d: &crate::data::Data) -> Vec<crate::tray::TrayApp> {
     let mut apps: Vec<&AppView> = d.apps().iter().collect();
+    let quotas = d.overview.as_ref().map(|o| o.quotas.as_slice()).unwrap_or_default();
     apps.sort_by_key(|a| {
-        let ruled = a.block_rule.is_some() || a.limit_rule.is_some();
+        let ruled = a.block_rule.is_some() || a.limit_rule.is_some() || app_quota(&a.rules, quotas).is_some();
         (!ruled, std::cmp::Reverse(a.total_up + a.total_down))
     });
     let mut picked: Vec<crate::tray::TrayApp> = apps
@@ -1819,7 +2026,8 @@ fn tray_apps(d: &crate::data::Data) -> Vec<crate::tray::TrayApp> {
                 }
                 _ => None,
             };
-            crate::tray::TrayApp { target: a.into(), down: a.rate_down, up: a.rate_up, limit }
+            let quota = app_quota(&a.rules, quotas).map(quota_text);
+            crate::tray::TrayApp { target: a.into(), down: a.rate_down, up: a.rate_up, limit, quota }
         })
         .collect();
     picked.sort_by_key(|a| a.target.name.to_lowercase());
@@ -1965,9 +2173,15 @@ impl eframe::App for NwlApp {
         self.notify_window(&ctx);
         self.about_window(&ctx);
 
-        let toast = lock(&self.data).toast.clone();
+        let (toast, undo) = {
+            let d = lock(&self.data);
+            let undo = d.toast_undo.clone().filter(|(at, _)| Some(*at) == d.toast.as_ref().map(|t| t.2));
+            (d.toast.clone(), undo.map(|(_, call)| call))
+        };
         if let Some((text, ok, at)) = toast {
-            if at.elapsed() < Duration::from_secs(4) {
+            // Undoable toasts stay a little longer.
+            let shown = Duration::from_secs(if undo.is_some() { 7 } else { 4 });
+            if at.elapsed() < shown {
                 egui::Area::new(egui::Id::new("toast"))
                     .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
                     .show(&ctx, |ui| {
@@ -1978,6 +2192,14 @@ impl eframe::App for NwlApp {
                                     ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                                 ui.painter().circle_filled(dot.center(), 4.0, color);
                                 ui.label(text);
+                                if let Some(call) = &undo {
+                                    if ui.button(RichText::new("Undo").strong()).clicked() {
+                                        let _ = self.poller.send(Request::Call(call.clone()));
+                                        let mut d = lock(&self.data);
+                                        d.toast = None;
+                                        d.toast_undo = None;
+                                    }
+                                }
                             });
                         });
                     });
@@ -2074,4 +2296,63 @@ fn theme_menu(ui: &mut Ui, current: &str) -> Option<String> {
         .0
         .on_hover_text("Theme");
     choice
+}
+
+/// Starts the system service through polkit (a password prompt), reporting
+/// the outcome as a toast. The poller notices when it answers.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_service(data: Shared) {
+    lock(&data).toast = Some(("Starting the service…".into(), true, Instant::now()));
+    std::thread::spawn(move || {
+        let result =
+            std::process::Command::new("pkexec").args(["systemctl", "start", "nwld.service"]).output();
+        let toast = match result {
+            Ok(out) if out.status.success() => ("Service started".to_string(), true),
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                if err.contains("not found") || err.contains("not loaded") {
+                    ("nwld.service isn't installed. Start nwld with: sudo nwld".to_string(), false)
+                } else if out.status.code() == Some(126) || out.status.code() == Some(127) {
+                    ("Not started: the password prompt was cancelled".to_string(), false)
+                } else {
+                    (format!("Starting the service failed: {}", err.trim()), false)
+                }
+            }
+            Err(_) => ("pkexec isn't available. Run: sudo systemctl start nwld".to_string(), false),
+        };
+        lock(&data).toast = Some((toast.0, toast.1, Instant::now()));
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Opening a rule in the form and saving it unchanged gives the same rule,
+    /// including what the form doesn't show.
+    #[test]
+    fn editing_a_rule_round_trips() {
+        let rules = [
+            r#"{"id":4,"name":"Steam on the hotspot","enabled":false,
+                "match":{"app":"steam","protocol":"tcp","remote":["10.0.0.0/8","2001:db8::/32"],
+                         "remote_ports":[443,"27000-27100"],"local_ports":[5000],"uid":1000},
+                "action":{"type":"limit","download":1234567,"upload":"1MB/s"},
+                "schedule":{"days":["mon","fri"],"from":"22:00","until":"06:00"},
+                "network":{"metered":true,"names":["Pixel 8","Office"]}}"#,
+            r#"{"id":7,"name":"","enabled":true,"match":{"app":"/usr/bin/dropbox"},
+                "action":{"type":"quota","limit":"500MB","period":"day","direction":"out"}}"#,
+            r#"{"id":9,"name":"x","enabled":true,"match":{},"action":{"type":"block","direction":"in"},
+                "schedule":{"days":["sat","sun"]}}"#,
+            r#"{"id":2,"name":"ok","enabled":true,"match":{"remote":["192.168.1.0/24"]},"action":{"type":"allow"}}"#,
+        ];
+        for json in rules {
+            let rule: Rule = serde_json::from_str(json).unwrap();
+            let built = RuleForm::from_rule(&rule).build().unwrap();
+            let back: Rule = serde_json::from_value(built).unwrap();
+            assert_eq!(back, rule, "{json}");
+        }
+        assert_eq!(exact_size(5_000_000), "5.00 MB");
+        assert_eq!(exact_size(1_234_567), "1234567");
+        assert_eq!(exact_rate(1_234_567), "1234567B/s");
+    }
 }
