@@ -103,6 +103,12 @@ impl When {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum PresetAction {
+    Add,
+    Remove,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum Treat {
     /// Treat the current network as metered.
     Metered,
@@ -215,6 +221,14 @@ enum Cmd {
     },
     /// Recent events (new applications, quotas reached, rule changes).
     Events,
+    /// Ready-made rule sets: list them, or add or remove one, e.g.
+    /// `nwl preset add hotspot-saver`.
+    Preset {
+        #[arg(value_enum)]
+        action: Option<PresetAction>,
+        /// The preset (id or name).
+        name: Option<String>,
+    },
     /// Print a backup of all rules and network choices (JSON), e.g.
     /// `nwl export > backup.json`.
     Export,
@@ -719,6 +733,45 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 println!("no traffic to remote hosts yet");
             } else {
                 table(&headers, &rows, &[2, 3, 6]);
+            }
+        }
+        Cmd::Preset { action, name } => {
+            use nwl_core::presets::{Preset, PRESETS};
+            let rules: Vec<Rule> = serde_json::from_value(c.get("/api/rules")?)?;
+            let Some(action) = action else {
+                for p in &PRESETS {
+                    let added = rules.iter().filter(|r| p.owns(r)).count();
+                    let status = if added == 0 { String::new() } else { format!("  [{added} rules added]") };
+                    println!(
+                        "{:<16} {}{status}\n  {}\n  covers {}\n",
+                        p.id,
+                        p.name,
+                        p.description,
+                        p.app_labels().join(", ")
+                    );
+                }
+                return Ok(());
+            };
+            let name = name.ok_or_else(|| anyhow::anyhow!("which preset? see `nwl preset`"))?;
+            let preset =
+                Preset::find(&name).ok_or_else(|| anyhow::anyhow!("no preset {name:?}; see `nwl preset`"))?;
+            match action {
+                PresetAction::Add => {
+                    let backup = json!({
+                        "format": nwl_core::api::BACKUP_FORMAT,
+                        "version": nwl_core::api::BACKUP_VERSION,
+                        "rules": preset.rules(),
+                    });
+                    let r = c.call("POST", "/api/import?mode=merge", Some(backup))?;
+                    println!("{}: added {} rules ({} already there)", preset.name, r["rules"], r["skipped"]);
+                }
+                PresetAction::Remove => {
+                    let owned: Vec<&Rule> = rules.iter().filter(|r| preset.owns(r)).collect();
+                    for r in &owned {
+                        c.call("DELETE", &format!("/api/rules/{}", r.id), None)?;
+                    }
+                    println!("{}: removed {} rules", preset.name, owned.len());
+                }
             }
         }
         Cmd::Export => raw("/api/export")?,

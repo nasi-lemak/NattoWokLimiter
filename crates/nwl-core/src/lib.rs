@@ -8,6 +8,7 @@
 //! * [`remotes`]: bytes per remote address per application.
 //! * [`history`]: long-term traffic history per minute and hour.
 //! * [`network`]: the current network (metered or not) and rules that depend on it.
+//! * [`presets`]: ready-made rule sets.
 //! * [`spikes`]: traffic spike detection per application.
 //! * [`api`]: request and response types of the daemon's HTTP API.
 
@@ -16,6 +17,7 @@ pub mod api;
 pub mod history;
 pub mod model;
 pub mod network;
+pub mod presets;
 pub mod quota;
 pub mod rate;
 pub mod remotes;

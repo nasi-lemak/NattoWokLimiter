@@ -62,6 +62,7 @@ There are three front ends over the same daemon:
 | Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
 | Edit rules in place, undo deletes (quota usage included), quota progress on each app and in the tray | ✅ | ✅ |
 | Backup and restore of rules and network choices (replace or merge; drop the file on the window) | ✅ | ✅ |
+| Presets: "Hotspot saver", "Calm background downloads", "Focus hours" (one click, removable) | ✅ | ✅ |
 | Per-connection actions: close it, block its host for the app or for everyone | ✅ (sock_diag destroy) | ⚠️ close: IPv4 TCP only |
 | Apps shown with their own name and icon ("Firefox Web Browser"), from installed `.desktop` entries | ✅ | ❌ (program name, letter icon) |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
@@ -145,6 +146,7 @@ nwl history [--range R] [--app PATH] [--csv]
                                  traffic over hour|day|week|month|quarter, as a chart or CSV
 nwl remotes [--app PATH] [-n N]  remote hosts by traffic, per app or overall
 nwl events
+nwl preset [add|remove NAME]     ready-made rule sets (hotspot-saver, calm-downloads, focus-hours)
 nwl export > backup.json          back up all rules and network choices
 nwl import backup.json [--merge]  restore them (replace, or add what's missing)
 ```

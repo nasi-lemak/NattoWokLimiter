@@ -331,6 +331,7 @@ pub struct NwlApp {
     theme: String,
     applied_theme: &'static str,
     import: Option<ImportDialog>,
+    show_presets: bool,
     /// Image URIs of app icons registered with egui.
     icon_uris: std::collections::HashMap<AppId, String>,
     history_range: Range,
@@ -385,6 +386,7 @@ impl NwlApp {
             applied_theme: "",
             icon_uris: Default::default(),
             import: None,
+            show_presets: false,
             history_range: Range::Day,
             history_app: None,
             tray: {
@@ -1116,6 +1118,9 @@ impl NwlApp {
                 {
                     self.form = RuleForm { open: !self.form.open, ..RuleForm::default() };
                 }
+                if ui.button("Presets…").on_hover_text("Ready-made rule sets").clicked() {
+                    self.show_presets = !self.show_presets;
+                }
                 if ui.button("Import…").on_hover_text("Restore rules from a backup file").clicked() {
                     self.import = Some(ImportDialog::default());
                 }
@@ -1629,6 +1634,72 @@ impl NwlApp {
             });
         if let Some(app) = pick {
             self.history_app = Some(app);
+        }
+    }
+
+    /// Ready-made rule sets: what each does, and Add or Remove.
+    fn presets_window(&mut self, ctx: &egui::Context) {
+        if !self.show_presets {
+            return;
+        }
+        let rules = lock(&self.data).rules.clone();
+        let mut open = true;
+        let mut choice: Option<(&'static nwl_core::presets::Preset, bool)> = None;
+        egui::Window::new("Presets")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.weak("Each preset adds ordinary rules you can edit or delete one by one.");
+                for preset in &nwl_core::presets::PRESETS {
+                    ui.separator();
+                    let added = rules.iter().filter(|r| preset.owns(r)).count();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(preset.name).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if added > 0 && ui.button("Remove").clicked() {
+                                choice = Some((preset, false));
+                            }
+                            let label = if added > 0 { "Add missing" } else { "Add" };
+                            let all = added >= preset.rules().len();
+                            let add = egui::Button::new(RichText::new(label).color(col_on_accent()))
+                                .fill(col_accent());
+                            if !all && ui.add(add).clicked() {
+                                choice = Some((preset, true));
+                            }
+                            if all {
+                                ui.colored_label(col_ok(), "Added");
+                            }
+                        });
+                    });
+                    ui.label(preset.description);
+                    ui.weak(format!("Covers {}.", preset.app_labels().join(", ")));
+                }
+            });
+        self.show_presets = open;
+        match choice {
+            Some((preset, true)) => {
+                // Merging skips rules already there, so adding twice is harmless.
+                let backup = nwl_core::api::Backup {
+                    format: nwl_core::api::BACKUP_FORMAT.into(),
+                    version: nwl_core::api::BACKUP_VERSION,
+                    exported: String::new(),
+                    rules: preset.rules(),
+                    network: Default::default(),
+                };
+                let done = format!("Added {}", preset.name);
+                self.act("POST", "/api/import?mode=merge", serde_json::to_value(backup).ok(), &done);
+            }
+            Some((preset, false)) => {
+                let done = format!("Removed {}", preset.name);
+                for rule in rules.iter().filter(|r| preset.owns(r)) {
+                    let call = Call::new("DELETE", format!("/api/rules/{}", rule.id), None, done.clone());
+                    let _ = self.poller.send(Request::Call(call));
+                }
+            }
+            None => {}
         }
     }
 
@@ -2466,6 +2537,7 @@ impl eframe::App for NwlApp {
         self.notify_window(&ctx);
         self.about_window(&ctx);
         self.import_window(&ctx);
+        self.presets_window(&ctx);
 
         let (toast, undo) = {
             let d = lock(&self.data);
