@@ -6,6 +6,7 @@
 //! * Enforcement: Windows Firewall rules and QoS policies, see
 //!   [`crate::winplan`].
 
+pub mod appinfo;
 pub mod netcost;
 
 use crate::{winplan, EnforceReport, Enforcer, Error, Monitor, Policy, Result};

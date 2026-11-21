@@ -53,9 +53,9 @@ trade-offs stay visible.
   on Linux; Windows toasts and macOS notifications show without buttons for now.
 - **Web dashboard extras.** The dashboard is the desktop app compiled to WebAssembly. Next: browser
   notifications, and a smaller download.
-- **App identity on Windows and macOS.** Names and icons come from `.desktop` entries on Linux. Next:
-  the executable's version info and icon on Windows, `Info.plist` on macOS, and grouping helper
-  processes (browser and launcher helpers) under their app.
+- **App identity.** Names and icons are done on Linux (`.desktop` entries) and Windows (version info
+  and icon). Next: `Info.plist` on macOS, and grouping helper processes (browser and launcher helpers)
+  under their app.
 - **Remote management** with authentication (token or mTLS), and several machines in one dashboard.
 - **Packages.** deb and rpm are done (built by CI, attached to releases). Next: AUR, an MSI with a
   service installer, Homebrew.

@@ -68,7 +68,7 @@ There are three front ends over the same daemon:
 | Domain names from DNS answers on connections; rules by domain (`doubleclick.net`, `*.ads.example`) | ✅ watches DNS answers (root) | ⚠️ exact domains only (looked up directly) |
 | Country and network owner of remote hosts, from a free GeoLite2 or DB-IP Lite database you install | ✅ | ✅ |
 | Per-connection actions: close it, block its host for the app or for everyone | ✅ (sock_diag destroy) | ⚠️ close: IPv4 TCP only |
-| Apps shown with their own name and icon ("Firefox Web Browser"), from installed `.desktop` entries | ✅ | ❌ (program name, letter icon) |
+| Apps shown with their own name and icon ("Firefox Web Browser") | ✅ from `.desktop` entries | ✅ from the program's version info and icon |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
 | Color themes (7, all checked for contrast), or follow the system's light/dark setting | ✅ | ✅ |

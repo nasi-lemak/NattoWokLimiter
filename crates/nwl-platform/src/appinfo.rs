@@ -26,7 +26,7 @@ pub trait AppCatalog: Send {
     fn lookup(&mut self, app: &AppId) -> Option<AppInfo>;
 }
 
-/// Knows nothing (Windows and macOS for now, and the demo).
+/// Knows nothing (macOS for now).
 pub struct NoCatalog;
 
 impl AppCatalog for NoCatalog {
@@ -35,9 +35,15 @@ impl AppCatalog for NoCatalog {
     }
 }
 
-/// The platform's catalog.
-pub fn native_catalog() -> Box<dyn AppCatalog> {
-    if cfg!(any(windows, target_os = "macos")) {
+/// The platform's catalog. `state_dir` holds converted icons on Windows.
+pub fn native_catalog(state_dir: &Path) -> Box<dyn AppCatalog> {
+    #[cfg(windows)]
+    {
+        return Box::new(crate::windows::appinfo::WindowsCatalog::new(state_dir.join("icons")));
+    }
+    #[allow(unreachable_code)]
+    if cfg!(target_os = "macos") {
+        let _ = state_dir;
         Box::new(NoCatalog)
     } else {
         Box::new(DesktopCatalog::new(DesktopCatalog::system_data_dirs()))

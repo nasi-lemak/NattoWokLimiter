@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     engine.set_count_loopback(args.include_loopback);
     // Friendly names and icons. Also in the demo: its apps get the real
     // icons of the same apps installed here.
-    engine.set_catalog(nwl_platform::appinfo::native_catalog());
+    engine.set_catalog(nwl_platform::appinfo::native_catalog(&state_dir));
     engine.enable_fingerprints();
     let geo_dirs: Vec<PathBuf> = args.geoip.iter().cloned().chain(geo::search_dirs(&state_dir)).collect();
     match geo::GeoDb::open(&geo_dirs) {
