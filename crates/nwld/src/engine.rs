@@ -76,6 +76,8 @@ pub struct Engine {
     identities: BTreeMap<AppId, Fingerprint>,
     hasher: Option<Hasher>,
     identity_checked: HashMap<AppId, i64>,
+    /// Country and network owner of remote addresses, if a database is installed.
+    geo: Option<crate::geo::GeoDb>,
     /// Quota rule -> period in which its 80% warning was raised.
     warned: HashMap<RuleId, String>,
     /// Whether quota states have been taken in since startup. The first
@@ -168,6 +170,7 @@ impl Engine {
             dns: Arc::default(),
             hasher: None,
             identity_checked: HashMap::new(),
+            geo: None,
             warned: HashMap::new(),
             quotas_primed: false,
             rules,
@@ -199,6 +202,19 @@ impl Engine {
     pub fn add_startup_warning(&mut self, warning: String) {
         self.status.warnings.push(warning.clone());
         self.startup_warnings.push(warning);
+    }
+
+    pub fn set_geo(&mut self, geo: crate::geo::GeoDb) {
+        self.geo = Some(geo);
+    }
+
+    /// The GeoIP database files in use.
+    pub fn geo_sources(&self) -> Vec<String> {
+        self.geo.as_ref().map(|g| g.sources.clone()).unwrap_or_default()
+    }
+
+    fn locate(&self, ip: std::net::IpAddr) -> nwl_core::api::Location {
+        self.geo.as_ref().map(|g| g.lookup(ip)).unwrap_or_default()
     }
 
     /// The DNS cache, for the threads that fill it.
@@ -811,10 +827,12 @@ impl Engine {
                     let now = chrono::Utc::now().timestamp();
                     dns.names(r.ip(), now).first().map(|n| n.to_string())
                 });
+                let location = conn.key.remote.map(|r| self.locate(r.ip())).unwrap_or_default();
                 Some(ConnView {
                     conn: conn.clone(),
                     remote_host,
                     domain,
+                    location,
                     name: app_id.as_ref().map(|a| self.app_name(a)),
                     app: app_id,
                     rate_up,
@@ -845,9 +863,13 @@ impl Engine {
                 .filter(|c| app.is_none() || self.snapshot.process_of(c).map(|p| p.app_id()).as_ref() == app)
                 .count()
         };
+        let dns = self.dns.lock().unwrap_or_else(|p| p.into_inner());
+        let now = chrono::Utc::now().timestamp();
         let view = |ip, s: &RemoteStats, apps: Vec<AppId>, app: Option<&AppId>| RemoteView {
             ip,
             host: self.resolver.as_ref().and_then(|r| r.lookup(ip)),
+            domain: dns.names(ip, now).first().map(|n| n.to_string()),
+            location: self.locate(ip),
             up: s.up,
             down: s.down,
             ports: s.ports.iter().copied().collect(),

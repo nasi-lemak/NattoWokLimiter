@@ -2,6 +2,7 @@
 
 mod api;
 mod engine;
+mod geo;
 mod identity;
 mod resolver;
 mod store;
@@ -49,6 +50,10 @@ struct Args {
     /// cover TCP only.
     #[arg(long)]
     no_ebpf: bool,
+    /// Folder with GeoIP databases (GeoLite2 or DB-IP Lite, country and ASN
+    /// .mmdb files), besides <state>/geoip and the system's GeoIP folders.
+    #[arg(long)]
+    geoip: Option<PathBuf>,
 }
 
 /// The monitor, the enforcer, and a warning when enforcement had to be disabled.
@@ -228,6 +233,16 @@ async fn main() -> anyhow::Result<()> {
     // icons of the same apps installed here.
     engine.set_catalog(nwl_platform::appinfo::native_catalog());
     engine.enable_fingerprints();
+    let geo_dirs: Vec<PathBuf> = args.geoip.iter().cloned().chain(geo::search_dirs(&state_dir)).collect();
+    match geo::GeoDb::open(&geo_dirs) {
+        Some(db) => {
+            tracing::info!("country and network owner from {}", db.sources.join(", "));
+            engine.set_geo(db);
+        }
+        None => {
+            tracing::info!("no GeoIP database found (see --geoip); countries and network owners not shown")
+        }
+    }
     if !args.no_resolve {
         let lookup = if args.demo { nwl_platform::sim::demo_hostname } else { resolver::system_lookup };
         engine.set_resolver(resolver::Resolver::new(4, lookup));

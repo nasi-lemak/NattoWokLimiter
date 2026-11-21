@@ -28,7 +28,8 @@ trade-offs stay visible.
 - **Domain names.** Done: DNS answers name connections and drive domain rules (Linux; exact domains
   are also looked up directly on every platform). Next: watching DNS on Windows (ETW) and DNS over
   TCP.
-- **GeoIP and ASN** for connection details and rules ("block this app outside my country").
+- **GeoIP and ASN.** Done for connection details (country and network owner). Next: rules by country
+  or network ("block this app outside my country"), turning a country into its address ranges.
 - **Profiles.** Schedules and network conditions are done (rules for metered networks or named
   networks, with detection via NetworkManager and Windows connection cost). Next: detection without
   NetworkManager (systemd-networkd, gateway MAC), and a mobile-data budget across all apps.

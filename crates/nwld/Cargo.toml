@@ -23,6 +23,8 @@ tokio-stream.workspace = true
 futures-util.workspace = true
 dns-lookup.workspace = true
 sha2 = "0.10"
+# Country and network owner of remote addresses (MaxMind-format databases).
+maxminddb = "0.33"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

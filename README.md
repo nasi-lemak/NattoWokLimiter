@@ -66,6 +66,7 @@ There are three front ends over the same daemon:
 | Presets: "Hotspot saver", "Calm background downloads", "Focus hours" (one click, removable) | ✅ | ✅ |
 | Program fingerprints (SHA-256): an event and notification when an app's program changes, updated or replaced | ✅ | ✅ |
 | Domain names from DNS answers on connections; rules by domain (`doubleclick.net`, `*.ads.example`) | ✅ watches DNS answers (root) | ⚠️ exact domains only (looked up directly) |
+| Country and network owner of remote hosts, from a free GeoLite2 or DB-IP Lite database you install | ✅ | ✅ |
 | Per-connection actions: close it, block its host for the app or for everyone | ✅ (sock_diag destroy) | ⚠️ close: IPv4 TCP only |
 | Apps shown with their own name and icon ("Firefox Web Browser"), from installed `.desktop` entries | ✅ | ❌ (program name, letter icon) |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
@@ -217,6 +218,12 @@ nwld watches DNS responses (a kernel filter passes only UDP from port 53, so not
 and on every platform it looks up exact domains named in rules once a minute. Connections show the
 domain the app looked up. Encrypted DNS (DNS over HTTPS, used by some browsers) can't be seen, so
 those lookups stay unnamed; a domain rule with no known address yet applies to nothing.
+
+**Countries and network owners** come from MaxMind-format databases: GeoLite2 (free account at
+maxmind.com, `geoipupdate` keeps it current) or DB-IP Lite (no account, CC BY 4.0, from db-ip.com),
+country and ASN editions. Put the `.mmdb` files in `<state dir>/geoip/` or a system GeoIP folder
+(`/var/lib/GeoIP`, `/usr/share/GeoIP`), or point `nwld --geoip DIR` at them. Without them, the rest
+works as before.
 
 Localhost traffic is never counted or policed unless the daemon runs with `--include-loopback`. It
 never reaches your ISP, and throttling it breaks local apps.

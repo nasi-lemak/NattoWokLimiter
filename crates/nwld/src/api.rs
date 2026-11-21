@@ -199,10 +199,13 @@ impl AppState {
 }
 
 async fn status(State(s): State<AppState>) -> impl IntoResponse {
+    // One lock: a second `s.engine()` in the same expression would deadlock.
+    let engine = s.engine();
     Json(nwl_core::api::Status {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: s.started.elapsed().as_secs(),
-        enforcement: s.engine().status.clone(),
+        enforcement: engine.status.clone(),
+        geoip: engine.geo_sources(),
     })
 }
 
@@ -601,6 +604,14 @@ mod tests {
         for bad in ["evil.com", "127.0.0.1.evil.com:80", "", "[::2]:1", "localhost.evil:1"] {
             assert!(!is_loopback_host(bad), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn status_answers() {
+        let (app, _wake) = app();
+        let (code, status) = call(&app, "GET", "/api/status", "localhost", false, "").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(status["geoip"], json!([]), "no GeoIP database in tests");
     }
 
     #[tokio::test]

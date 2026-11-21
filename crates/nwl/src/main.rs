@@ -549,7 +549,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         x["key"]["protocol"].as_str().unwrap_or("").to_string(),
                         x["key"]["local"].as_str().unwrap_or("").to_string(),
                         x["key"]["remote"].as_str().unwrap_or("*").to_string(),
-                        x["remote_host"].as_str().unwrap_or("").to_string(),
+                        x["domain"].as_str().or(x["remote_host"].as_str()).unwrap_or("").to_string(),
+                        [x["country"].as_str(), x["org"].as_str()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" "),
                         x["state"].as_str().unwrap_or("").to_string(),
                         rate(&x["rate_down"]),
                         rate(&x["rate_up"]),
@@ -559,9 +564,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 })
                 .collect();
             table(
-                &["APP", "PID", "PROTO", "LOCAL", "REMOTE", "HOST", "STATE", "DOWN", "UP", "RTT", "POLICY"],
+                &[
+                    "APP", "PID", "PROTO", "LOCAL", "REMOTE", "HOST", "WHERE", "STATE", "DOWN", "UP", "RTT",
+                    "POLICY",
+                ],
                 &rows,
-                &[1, 7, 8, 9],
+                &[1, 8, 9, 10],
             );
         }
         Cmd::Rules if cli.json => raw("/api/rules")?,

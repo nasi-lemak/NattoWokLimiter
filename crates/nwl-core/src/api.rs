@@ -15,6 +15,11 @@ pub struct RemoteView {
     /// Reverse-DNS name, once resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The domain apps looked up for it (from DNS answers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(flatten)]
+    pub location: Location,
     pub up: u64,
     pub down: u64,
     pub ports: Vec<u16>,
@@ -34,6 +39,25 @@ pub struct Status {
     pub version: String,
     pub uptime_secs: u64,
     pub enforcement: EnforcementStatus,
+    /// Country/ASN database files in use (empty: none installed).
+    #[serde(default)]
+    pub geoip: Vec<String>,
+}
+
+/// Where a remote address is: country and network owner, when a GeoIP
+/// database is installed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Location {
+    /// ISO 3166 country code, e.g. `DE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asn: Option<u32>,
+    /// The network's owner, e.g. `Google LLC`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +205,8 @@ pub struct ConnView {
     /// The domain the app looked up for this address (from DNS answers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(flatten)]
+    pub location: Location,
     pub app: Option<AppId>,
     pub name: Option<String>,
     pub rate_up: u64,

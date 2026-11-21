@@ -2047,6 +2047,10 @@ impl NwlApp {
                 if ui.link("About").clicked() {
                     self.show_about = !self.show_about;
                 }
+                // DB-IP's free databases ask for a credit where their data shows.
+                if d.status.as_ref().is_some_and(|s| s.geoip.iter().any(|f| f.contains("dbip"))) {
+                    ui.hyperlink_to(RichText::new("IP geolocation by DB-IP").small(), "https://db-ip.com");
+                }
             });
         });
         if let Some(s) = &d.status {
@@ -2282,13 +2286,16 @@ fn remotes_table(ui: &mut Ui, remotes: &[nwl_core::api::RemoteView]) {
                     row.col(|ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
-                            match &r.host {
+                            let detail = with_location(r.ip.to_string(), &r.location);
+                            match r.domain.as_ref().or(r.host.as_ref()) {
                                 Some(h) => {
                                     ui.label(RichText::new(h).strong()).on_hover_text(h);
-                                    ui.label(RichText::new(r.ip.to_string()).monospace().small().weak());
+                                    ui.label(RichText::new(detail).monospace().small().weak())
+                                        .on_hover_text(location_text(&r.location));
                                 }
                                 None => {
                                     ui.monospace(r.ip.to_string());
+                                    ui.label(RichText::new(location_text(&r.location)).small().weak());
                                 }
                             }
                         });
@@ -2406,6 +2413,7 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) -> Opti
                     });
                     row.col(|ui| {
                         let remote = c.conn.key.remote.map_or("*".into(), |r| r.to_string());
+                        let remote = with_location(remote, &c.location);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
                             // The domain the app looked up, else the reverse-DNS name.
@@ -2416,7 +2424,8 @@ fn conn_table(ui: &mut Ui, id: &str, conns: &[ConnView], with_app: bool) -> Opti
                                         _ => h.clone(),
                                     };
                                     ui.label(RichText::new(h).strong()).on_hover_text(hover);
-                                    ui.label(RichText::new(remote).monospace().small().weak());
+                                    ui.label(RichText::new(remote).monospace().small().weak())
+                                        .on_hover_text(location_text(&c.location));
                                 }
                                 None => {
                                     ui.monospace(remote);
@@ -2709,6 +2718,33 @@ impl eframe::App for NwlApp {
             }
         }
     }
+}
+
+/// An address with its country and network owner: `1.2.3.4:443 · US · Google LLC`.
+fn with_location(address: String, loc: &nwl_core::api::Location) -> String {
+    let mut out = address;
+    if let Some(c) = &loc.country {
+        out += &format!(" · {c}");
+    }
+    if let Some(o) = &loc.org {
+        out += &format!(" · {o}");
+    }
+    out
+}
+
+/// The location in words, for hover text.
+fn location_text(loc: &nwl_core::api::Location) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = loc.country_name.as_ref().or(loc.country.as_ref()) {
+        parts.push(name.clone());
+    }
+    match (&loc.org, loc.asn) {
+        (Some(o), Some(n)) => parts.push(format!("{o} (AS{n})")),
+        (Some(o), None) => parts.push(o.clone()),
+        (None, Some(n)) => parts.push(format!("AS{n}")),
+        (None, None) => {}
+    }
+    parts.join(", ")
 }
 
 fn metered_label(metered: Option<bool>) -> &'static str {
