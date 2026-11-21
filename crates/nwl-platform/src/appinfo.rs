@@ -304,6 +304,7 @@ fn resolve_program(program: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nwl-appinfo-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -311,6 +312,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn write(path: PathBuf, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
@@ -329,6 +331,8 @@ mod tests {
         assert!(parse_entry("[Desktop Entry]\nName=x\nHidden=true\n").is_none());
     }
 
+    // `.desktop` entries name Unix paths; Windows uses no catalog.
+    #[cfg(unix)]
     #[test]
     fn matches_programs_and_finds_icons() {
         let dir = temp_dir("match");
