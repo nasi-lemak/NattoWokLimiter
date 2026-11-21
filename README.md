@@ -8,6 +8,10 @@ written in Rust.
 
 ![NattoWok Limiter desktop app](docs/screenshot.png)
 
+**New here?** [Getting started](docs/GETTING-STARTED.md) explains installing and everyday use.
+Want to help? See [CONTRIBUTING](CONTRIBUTING.md); trying the Windows version and reporting back
+([checklist](docs/TESTING-WINDOWS.md)) is especially welcome.
+
 ```
 $ nwl top
 total  down 2.28 MB/s  up 138.40 kB/s  (session 227.10 MB down, 14.20 MB up)
