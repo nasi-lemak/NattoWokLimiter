@@ -6,10 +6,10 @@ use crate::resolver::Resolver;
 use crate::store::{KnownApps, Store, UsageDb};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use nwl_core::accounting::Accountant;
-use nwl_core::api::NetworkView;
 use nwl_core::api::{
     AppView, ConnView, EnforcementStatus, Event, EventKind, Overview, RemoteView, UsageDay, UsageEntry,
 };
+use nwl_core::api::{Backup, ImportResult, NetworkView, BACKUP_FORMAT, BACKUP_VERSION};
 use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapshot};
 use nwl_core::network::{Detected, Network, Overrides};
 use nwl_core::quota::{QuotaStatus, QuotaTracker, QuotaUsage};
@@ -233,6 +233,67 @@ impl Engine {
         self.network_source = source.to_string();
         self.detected = detected;
         self.update_network(!first);
+    }
+
+    /// Everything the user configured, for a backup file.
+    pub fn export(&self) -> Backup {
+        Backup {
+            format: BACKUP_FORMAT.into(),
+            version: BACKUP_VERSION,
+            exported: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            rules: self.rules.rules.clone(),
+            network: self.overrides.clone(),
+        }
+    }
+
+    /// Restores a backup. `merge` adds the rules and network choices that
+    /// aren't here yet; otherwise the backup replaces them. Nothing changes
+    /// unless the whole backup is valid.
+    pub fn import(&mut self, backup: Backup, merge: bool) -> Result<ImportResult, String> {
+        if backup.format != BACKUP_FORMAT {
+            return Err("this is not a NattoWok Limiter backup".into());
+        }
+        if backup.version > BACKUP_VERSION {
+            return Err("this backup was made by a newer version of NattoWok Limiter".into());
+        }
+        let result = if merge {
+            // A rule is already here if it does the same thing, whatever its id.
+            let same = |a: &Rule, b: &Rule| {
+                a.matcher == b.matcher
+                    && a.action == b.action
+                    && a.schedule == b.schedule
+                    && a.network == b.network
+            };
+            let mut rules = self.rules.clone();
+            let (mut added, mut skipped) = (0, 0);
+            for mut rule in backup.rules {
+                if rules.rules.iter().any(|r| same(r, &rule)) {
+                    skipped += 1;
+                    continue;
+                }
+                rule.id = 0;
+                rules.add(rule).map_err(|e| e.to_string())?;
+                added += 1;
+            }
+            self.rules = rules;
+            for (name, metered) in backup.network.metered {
+                self.overrides.metered.entry(name).or_insert(metered);
+            }
+            ImportResult { rules: added, skipped, replaced: false }
+        } else {
+            let rules = RuleSet::new(backup.rules).map_err(|e| e.to_string())?;
+            let count = rules.rules.len();
+            self.rules = rules;
+            self.overrides = backup.network;
+            ImportResult { rules: count, skipped: 0, replaced: true }
+        };
+        self.rules_changed();
+        if let Err(e) = self.store.save(NETWORK, &self.overrides) {
+            tracing::error!("saving network choices: {e:#}");
+        }
+        self.update_network(true);
+        self.push_event(EventKind::Imported { rules: result.rules, replaced: result.replaced });
+        Ok(result)
     }
 
     /// Treats the current network as metered or not (`None`: as detected),
@@ -1110,6 +1171,47 @@ mod tests {
         assert_eq!(e.icon("/opt/steam/steam"), Some("/icons/steam.png".into()));
         assert_eq!(e.icon("/usr/bin/other"), None);
         assert_eq!(lookups.load(Ordering::Relaxed), 1, "looked up once per app");
+    }
+
+    #[test]
+    fn backups_restore_and_merge() {
+        let mut e = Engine::new(temp_store("backup"), 10).unwrap();
+        let rule = |json: &str| -> Rule { serde_json::from_str(json).unwrap() };
+        e.add_rule(rule(r#"{"name":"a","match":{"app":"steam"},"action":{"type":"block"}}"#)).unwrap();
+        e.set_network("test", Detected { name: Some("Pixel".into()), metered: Some(false) });
+        e.set_metered(Some(true)).unwrap();
+        let backup = e.export();
+        let text = serde_json::to_string(&backup).unwrap();
+        assert!(text.contains(r#""format":"nattowok-backup""#));
+
+        // Merge into a machine that has one of the rules already.
+        let mut other = Engine::new(temp_store("backup-merge"), 10).unwrap();
+        other
+            .add_rule(rule(r#"{"name":"same thing","match":{"app":"steam"},"action":{"type":"block"}}"#))
+            .unwrap();
+        other.add_rule(rule(r#"{"name":"mine","action":{"type":"allow"}}"#)).unwrap();
+        let r = other.import(serde_json::from_str(&text).unwrap(), true).unwrap();
+        assert_eq!((r.rules, r.skipped, r.replaced), (0, 1, false));
+        assert_eq!(other.rules.rules.len(), 2);
+        assert_eq!(other.overrides.get(Some("Pixel")), Some(true), "network choices merged");
+
+        // Replace.
+        let r = other.import(backup.clone(), false).unwrap();
+        assert_eq!((r.rules, r.replaced), (1, true));
+        assert_eq!(other.rules.rules[0].name, "a");
+        assert_eq!(other.rules.rules[0].id, backup.rules[0].id, "ids kept on replace");
+
+        // Bad files change nothing.
+        let mut bad = backup.clone();
+        bad.format = "something else".into();
+        assert!(other.import(bad, false).is_err());
+        let mut newer = backup.clone();
+        newer.version = 99;
+        assert!(other.import(newer, false).unwrap_err().contains("newer version"));
+        let mut invalid = backup;
+        invalid.rules.push(rule(r#"{"action":{"type":"limit"}}"#));
+        assert!(other.import(invalid, false).is_err());
+        assert_eq!(other.rules.rules.len(), 1, "unchanged after a failed import");
     }
 
     #[test]

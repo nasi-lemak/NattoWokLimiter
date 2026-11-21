@@ -284,6 +284,35 @@ impl RuleForm {
     }
 }
 
+/// Restoring a backup: the file (dropped on the window or, on the desktop,
+/// given by path) and how to apply it.
+#[derive(Default)]
+struct ImportDialog {
+    /// File name and contents.
+    file: Option<(String, String)>,
+    path: String,
+    merge: bool,
+    error: Option<String>,
+}
+
+impl ImportDialog {
+    fn load(&mut self, name: String, text: String) {
+        self.error = match serde_json::from_str::<nwl_core::api::Backup>(&text) {
+            Ok(b) if b.format == nwl_core::api::BACKUP_FORMAT => None,
+            _ => Some(format!("{name} is not a NattoWok Limiter backup.")),
+        };
+        self.file = Some((name, text));
+    }
+
+    /// The backup, when a valid one is loaded.
+    fn backup(&self) -> Option<nwl_core::api::Backup> {
+        let (_, text) = self.file.as_ref()?;
+        serde_json::from_str::<nwl_core::api::Backup>(text)
+            .ok()
+            .filter(|b| b.format == nwl_core::api::BACKUP_FORMAT)
+    }
+}
+
 pub struct NwlApp {
     client: Client,
     data: Shared,
@@ -301,6 +330,7 @@ pub struct NwlApp {
     /// The chosen theme (`"system"` or a theme id), and the palette applied.
     theme: String,
     applied_theme: &'static str,
+    import: Option<ImportDialog>,
     /// Image URIs of app icons registered with egui.
     icon_uris: std::collections::HashMap<AppId, String>,
     history_range: Range,
@@ -350,6 +380,7 @@ impl NwlApp {
             theme: crate::theme::load(),
             applied_theme: "",
             icon_uris: Default::default(),
+            import: None,
             history_range: Range::Day,
             history_app: None,
             tray: {
@@ -1056,6 +1087,7 @@ impl NwlApp {
     }
 
     fn rules_tab(&mut self, ui: &mut Ui) {
+        let mut export = false;
         ui.horizontal(|ui| {
             ui.weak("Access rules: first match wins. Limits and quotas always apply.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1066,8 +1098,18 @@ impl NwlApp {
                 {
                     self.form = RuleForm { open: !self.form.open, ..RuleForm::default() };
                 }
+                if ui.button("Import…").on_hover_text("Restore rules from a backup file").clicked() {
+                    self.import = Some(ImportDialog::default());
+                }
+                if ui.button("Export").on_hover_text("Save all rules and network choices to a file").clicked()
+                {
+                    export = true;
+                }
             });
         });
+        if export {
+            self.export_backup(ui.ctx());
+        }
         if self.form.open {
             self.rule_form(ui);
         }
@@ -1572,6 +1614,129 @@ impl NwlApp {
         }
     }
 
+    /// Saves a backup of rules and network choices in the Downloads folder
+    /// (in the browser: downloads it).
+    fn export_backup(&self, ctx: &egui::Context) {
+        #[cfg(target_arch = "wasm32")]
+        ctx.open_url(egui::OpenUrl::same_tab(format!("{}/api/export", self.client.base())));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = ctx;
+            let name = format!("nattowok-backup-{}.json", chrono::Local::now().format("%Y-%m-%d"));
+            let result = self.client.get_text("/api/export").and_then(|json| {
+                let file = downloads_dir().join(&name);
+                std::fs::write(&file, json).map_err(|e| format!("saving {}: {e}", file.display()))?;
+                Ok(file)
+            });
+            lock(&self.data).toast = Some(match result {
+                Ok(file) => (format!("Backup saved to {}", file.display()), true, Instant::now()),
+                Err(e) => (e, false, Instant::now()),
+            });
+        }
+    }
+
+    /// Restoring a backup: takes files dropped on the window (anywhere), and
+    /// asks whether to replace or merge.
+    fn import_window(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if let Some(file) = dropped.into_iter().next() {
+            let name = file
+                .path()
+                .file_name()
+                .map_or_else(|| file.path().display().to_string(), |n| n.to_string_lossy().into_owned());
+            let text =
+                |bytes: Result<Vec<u8>, String>| bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                lock(&self.data).dropped_file = Some((name, text(file.bytes())));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Browsers read files asynchronously.
+                let (data, ctx) = (self.data.clone(), ctx.clone());
+                wasm_bindgen_futures::spawn_local(async move {
+                    let read = text(file.bytes_async().await);
+                    lock(&data).dropped_file = Some((name, read));
+                    ctx.request_repaint();
+                });
+            }
+        }
+        if let Some((name, read)) = lock(&self.data).dropped_file.take() {
+            let dialog = self.import.get_or_insert_with(ImportDialog::default);
+            match read {
+                Ok(text) => dialog.load(name, text),
+                Err(e) => dialog.error = Some(format!("{name}: {e}")),
+            }
+            self.tab = Tab::Rules;
+        }
+        let Some(dialog) = &mut self.import else { return };
+        let mut open = true;
+        let mut restore = false;
+        egui::Window::new("Restore a backup")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                match dialog.backup() {
+                    Some(b) => {
+                        let (name, _) = dialog.file.as_ref().expect("a backup is loaded");
+                        ui.label(RichText::new(name).strong());
+                        let when = b.exported.get(..10).unwrap_or("an unknown date");
+                        ui.label(format!(
+                            "{} rules and {} network choices, saved {when}.",
+                            b.rules.len(),
+                            b.network.metered.len()
+                        ));
+                    }
+                    None => {
+                        ui.label("Drop a NattoWok Limiter backup file (.json) onto this window.");
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.horizontal(|ui| {
+                    ui.label("Or its path:");
+                    let edit = ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(220.0));
+                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (ui.button("Open").clicked() || enter) && !dialog.path.trim().is_empty() {
+                        let path = dialog.path.trim().to_string();
+                        match std::fs::read_to_string(&path) {
+                            Ok(text) => dialog.load(path, text),
+                            Err(e) => dialog.error = Some(format!("{path}: {e}")),
+                        }
+                    }
+                });
+                if let Some(e) = &dialog.error {
+                    ui.colored_label(col_bad(), e);
+                }
+                ui.separator();
+                ui.radio_value(&mut dialog.merge, false, "Replace my rules with the backup's");
+                ui.radio_value(&mut dialog.merge, true, "Add the backup's rules I don't have yet");
+                ui.add_space(4.0);
+                let ready = dialog.backup().is_some();
+                let button =
+                    egui::Button::new(RichText::new("Restore").color(col_on_accent())).fill(col_accent());
+                restore = ui.add_enabled(ready, button).clicked();
+            });
+        if restore {
+            if let Some(backup) = dialog.backup() {
+                let mode = if dialog.merge { "merge" } else { "replace" };
+                let done = if dialog.merge { "Backup merged" } else { "Rules restored from the backup" };
+                self.act(
+                    "POST",
+                    &format!("/api/import?mode={mode}"),
+                    serde_json::to_value(backup).ok(),
+                    done,
+                );
+            }
+            open = false;
+        }
+        if !open {
+            self.import = None;
+        }
+    }
+
     /// Saves the current history view as CSV in the Downloads folder (in the
     /// browser: downloads it).
     fn export_history(&self, ctx: &egui::Context) {
@@ -1632,6 +1797,12 @@ impl NwlApp {
                         EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(col_ok())),
                         EventKind::Paused => ("All rules paused".into(), Some(col_accent())),
                         EventKind::Resumed => ("All rules resumed".into(), Some(col_ok())),
+                        EventKind::Imported { rules, replaced: true } => {
+                            (format!("Rules restored from a backup ({rules} rules)"), None)
+                        }
+                        EventKind::Imported { rules, replaced: false } => {
+                            (format!("{rules} rules added from a backup"), None)
+                        }
                         EventKind::NetworkChanged { name, metered, rules } => {
                             let kind = if *metered { "metered" } else { "unmetered" };
                             let name = name.as_deref().map_or(String::new(), |n| format!(" {n}"));
@@ -2206,6 +2377,7 @@ impl eframe::App for NwlApp {
         self.limit_window(&ctx);
         self.notify_window(&ctx);
         self.about_window(&ctx);
+        self.import_window(&ctx);
 
         let (toast, undo) = {
             let d = lock(&self.data);

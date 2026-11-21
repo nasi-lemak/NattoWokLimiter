@@ -68,6 +68,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pause", post(pause))
         .route("/api/network", get(network).put(set_network))
         .route("/api/icon", get(icon))
+        .route("/api/export", get(export))
+        .route("/api/import", post(import))
         .route("/api/quotas", get(quotas))
         .route("/api/events", get(events))
         .route("/api/usage", get(usage))
@@ -277,6 +279,44 @@ async fn pause(State(s): State<AppState>, Json(body): Json<PauseBody>) -> Respon
     s.engine().set_paused(body.paused);
     s.reapply();
     Json(s.engine().status.clone()).into_response()
+}
+
+/// A backup file download.
+async fn export(State(s): State<AppState>) -> Response {
+    let backup = s.engine().export();
+    let name = format!("nattowok-backup-{}.json", chrono::Local::now().format("%Y-%m-%d"));
+    ([(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))], Json(backup))
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct ImportQuery {
+    /// `merge` adds what's missing; otherwise the backup replaces everything.
+    mode: Option<String>,
+}
+
+async fn import(
+    State(s): State<AppState>,
+    Query(q): Query<ImportQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    // Checked here rather than by the extractor, for a message people understand.
+    if body["format"] != nwl_core::api::BACKUP_FORMAT {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, "this is not a NattoWok Limiter backup");
+    }
+    let backup: nwl_core::api::Backup = match serde_json::from_value(body) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, &format!("the backup is damaged: {e}")),
+    };
+    let merge = q.mode.as_deref() == Some("merge");
+    let result = s.engine().import(backup, merge);
+    match result {
+        Ok(r) => {
+            s.reapply();
+            Json(r).into_response()
+        }
+        Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, &e),
+    }
 }
 
 #[derive(Deserialize)]

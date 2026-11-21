@@ -85,6 +85,12 @@ pub enum EventKind {
     Paused,
     /// The user resumed all rules.
     Resumed,
+    /// Rules were restored from a backup.
+    Imported {
+        /// Rules added (merge) or now in place (replace).
+        rules: usize,
+        replaced: bool,
+    },
     /// The machine moved to another network, or its metered state changed.
     NetworkChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,4 +220,36 @@ pub struct UsageEntry {
     pub name: String,
     pub up: u64,
     pub down: u64,
+}
+
+/// Recognizes a backup file.
+pub const BACKUP_FORMAT: &str = "nattowok-backup";
+/// The newest backup version this build reads.
+pub const BACKUP_VERSION: u32 = 1;
+
+/// `GET /api/export`, `POST /api/import`: everything the user configured,
+/// to keep a copy or move to another computer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Backup {
+    /// Always [`BACKUP_FORMAT`].
+    pub format: String,
+    pub version: u32,
+    /// When it was made (RFC 3339), for people reading the file.
+    #[serde(default)]
+    pub exported: String,
+    #[serde(default)]
+    pub rules: Vec<crate::rules::Rule>,
+    /// Networks the user marked metered or not.
+    #[serde(default)]
+    pub network: crate::network::Overrides,
+}
+
+/// The outcome of `POST /api/import`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportResult {
+    /// Rules added (merge) or now in place (replace).
+    pub rules: usize,
+    /// Rules of the backup already present (merge only).
+    pub skipped: usize,
+    pub replaced: bool,
 }

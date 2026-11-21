@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use nwl_core::rate::{format_bytes, ByteSize, Rate};
 use nwl_core::rules::{Day, Rule, TimeOfDay};
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -214,6 +215,17 @@ enum Cmd {
     },
     /// Recent events (new applications, quotas reached, rule changes).
     Events,
+    /// Print a backup of all rules and network choices (JSON), e.g.
+    /// `nwl export > backup.json`.
+    Export,
+    /// Restore a backup made by `nwl export` or the app.
+    Import {
+        /// The backup file (`-` reads standard input).
+        file: PathBuf,
+        /// Add the backup's rules you don't have yet, instead of replacing all rules.
+        #[arg(long)]
+        merge: bool,
+    },
 }
 
 struct Client {
@@ -707,6 +719,26 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 println!("no traffic to remote hosts yet");
             } else {
                 table(&headers, &rows, &[2, 3, 6]);
+            }
+        }
+        Cmd::Export => raw("/api/export")?,
+        Cmd::Import { file, merge } => {
+            let text = if file.as_os_str() == "-" {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                s
+            } else {
+                std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?
+            };
+            let backup: Value = serde_json::from_str(&text).context("the file is not JSON")?;
+            let mode = if merge { "merge" } else { "replace" };
+            let r = c.call("POST", &format!("/api/import?mode={mode}"), Some(backup))?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else if merge {
+                println!("added {} rules ({} already present)", r["rules"], r["skipped"]);
+            } else {
+                println!("restored {} rules", r["rules"]);
             }
         }
         Cmd::Events => {

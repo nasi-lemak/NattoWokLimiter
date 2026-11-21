@@ -53,6 +53,9 @@ pub struct Data {
     /// App icons fetched from the daemon: `(uri, bytes)` for egui's image
     /// loaders; `None` if fetching failed (not retried).
     pub icons: HashMap<AppId, Option<Icon>>,
+    /// A file dropped on the window: its name and text (read asynchronously
+    /// in the browser).
+    pub dropped_file: Option<(String, Result<String, String>)>,
     last_mono: u64,
     last_event: u64,
     primed: bool,

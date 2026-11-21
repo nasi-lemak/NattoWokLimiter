@@ -61,6 +61,7 @@ There are three front ends over the same daemon:
 | Buttons on notifications: "Block" a new app, "Block" or "Limit to 1 MB/s" on a spike | ✅ | ❌ (plain notifications) |
 | Pause all rules with one click (traffic still counted; a restart resumes) | ✅ | ✅ |
 | Edit rules in place, undo deletes (quota usage included), quota progress on each app and in the tray | ✅ | ✅ |
+| Backup and restore of rules and network choices (replace or merge; drop the file on the window) | ✅ | ✅ |
 | Apps shown with their own name and icon ("Firefox Web Browser"), from installed `.desktop` entries | ✅ | ❌ (program name, letter icon) |
 | Start with login, in the tray (opt-in, per user, no admin rights) | ✅ XDG autostart | ✅ (macOS: LaunchAgent) |
 | Desktop app, web dashboard, REST API, live stream, CLI | ✅ | ✅ |
@@ -143,6 +144,8 @@ nwl history [--range R] [--app PATH] [--csv]
                                  traffic over hour|day|week|month|quarter, as a chart or CSV
 nwl remotes [--app PATH] [-n N]  remote hosts by traffic, per app or overall
 nwl events
+nwl export > backup.json          back up all rules and network choices
+nwl import backup.json [--merge]  restore them (replace, or add what's missing)
 ```
 
 Use `--json` for machine-readable output. `APP` is an executable name (`firefox`), a full path, or a glob
@@ -264,6 +267,8 @@ pages).
 | PUT/DELETE | `/api/rules/{id}` | replace / delete |
 | POST | `/api/rules/{id}/move` | `{"index": n}` reorder |
 | POST | `/api/pause` | `{"paused": true}` pauses all rules, `false` resumes |
+| GET | `/api/export` | backup of rules and network choices (JSON download) |
+| POST | `/api/import?mode=replace\|merge` | restore a backup |
 | GET | `/api/icon?app=PATH` | the app's icon (PNG or SVG), when its `.desktop` entry has one |
 | GET/PUT | `/api/network` | the current network; `{"metered": true \| false \| null}` overrides detection for it |
 | GET | `/api/quotas` | quota usage in the current period |

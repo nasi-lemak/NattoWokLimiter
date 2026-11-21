@@ -88,6 +88,7 @@ impl Settings {
                 EventKind::QuotaExhausted { .. } => self.quota_exhausted,
                 EventKind::EnforcementError { .. } | EventKind::EnforcementRecovered => self.enforcement,
                 EventKind::NetworkChanged { .. } => self.network,
+                EventKind::Imported { .. } => false,
                 // The user made these changes themselves.
                 EventKind::RuleAdded { .. }
                 | EventKind::RuleChanged { .. }
@@ -136,6 +137,7 @@ pub fn text(kind: &EventKind) -> Option<(String, String)> {
         EventKind::EnforcementRecovered => {
             ("Rules are applied again".to_string(), "Blocks and limits are active.".to_string())
         }
+        EventKind::Imported { .. } => return None,
         // Moving between unmetered networks changes nothing worth a popup.
         EventKind::NetworkChanged { metered: false, rules: 0, .. } => return None,
         EventKind::NetworkChanged { name, metered, rules } => {
