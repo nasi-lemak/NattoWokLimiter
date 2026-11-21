@@ -48,6 +48,8 @@ pub struct Data {
     pub toast: Option<(String, bool, Instant)>,
     /// Outcome of the last rule-form submission, for the form to pick up.
     pub rule_form_result: Option<Result<(), String>>,
+    /// The daemon's settings (ask about new apps).
+    pub settings: Option<nwl_core::api::DaemonSettings>,
     /// The "Undo" for the toast shown at that instant.
     pub toast_undo: Option<(Instant, Call)>,
     /// App icons fetched from the daemon: `(uri, bytes)` for egui's image
@@ -263,6 +265,7 @@ async fn poll(client: &Client, data: &Shared, timers: &mut Timers) {
         Some((system, apps))
     };
     let status: Option<Status> = client.get("/api/status").await.ok();
+    let settings: Option<nwl_core::api::DaemonSettings> = client.get("/api/settings").await.ok();
     let rules: Option<Vec<Rule>> = client.get("/api/rules").await.ok();
     let connections: Option<Vec<ConnView>> = client.get("/api/connections").await.ok();
     let last_event = lock(data).last_event;
@@ -339,6 +342,9 @@ async fn poll(client: &Client, data: &Shared, timers: &mut Timers) {
         d.events.truncate(500);
         if let Some(s) = status {
             d.status = Some(s);
+        }
+        if settings.is_some() {
+            d.settings = settings;
         }
         if let Some(r) = rules {
             d.rules = r;

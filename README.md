@@ -54,6 +54,7 @@ There are three front ends over the same daemon:
 | Usage history per app per day (400 days) | ✅ | ✅ |
 | Traffic history graphs, whole machine or one app: last hour to last 90 days, CSV export | ✅ | ✅ |
 | "New app used the network" events | ✅ | ✅ |
+| Ask before new apps go online: held (blocked) until you answer Allow / Allow this time / Block, in the app or from notification buttons. Noticed within a second, so the first packets can get through | ✅ | ✅ |
 | Traffic spike detection ("Dropbox is uploading at 8 MB/s, usually 12 kB/s") | ✅ | ✅ |
 | Desktop notifications for new apps, spikes, quotas and enforcement problems, each switchable | ✅ | ✅ |
 | Tray icon: live speed meter, pause/resume all rules, close to tray | ✅ StatusNotifierItem (no GTK) | ✅ native |
@@ -146,6 +147,8 @@ nwl history [--range R] [--app PATH] [--csv]
                                  traffic over hour|day|week|month|quarter, as a chart or CSV
 nwl remotes [--app PATH] [-n N]  remote hosts by traffic, per app or overall
 nwl events
+nwl ask [on|off]                 ask before new apps use the network; shows waiting apps
+nwl answer APP allow|once|block  answer for a waiting app
 nwl preset [add|remove NAME]     ready-made rule sets (hotspot-saver, calm-downloads, focus-hours)
 nwl export > backup.json          back up all rules and network choices
 nwl import backup.json [--merge]  restore them (replace, or add what's missing)
@@ -271,6 +274,9 @@ pages).
 | PUT/DELETE | `/api/rules/{id}` | replace / delete |
 | POST | `/api/rules/{id}/move` | `{"index": n}` reorder |
 | POST | `/api/pause` | `{"paused": true}` pauses all rules, `false` resumes |
+| GET/PUT | `/api/settings` | daemon settings: `{"ask_new_apps": true}` |
+| GET | `/api/prompts` | new apps waiting for an answer |
+| POST | `/api/prompts/answer` | `{"app": PATH, "answer": "allow" \| "once" \| "block"}` |
 | GET | `/api/export` | backup of rules and network choices (JSON download) |
 | POST | `/api/import?mode=replace\|merge` | restore a backup |
 | GET | `/api/icon?app=PATH` | the app's icon (PNG or SVG), when its `.desktop` entry has one |

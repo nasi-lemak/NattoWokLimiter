@@ -89,6 +89,7 @@ impl Settings {
                 EventKind::EnforcementError { .. } | EventKind::EnforcementRecovered => self.enforcement,
                 EventKind::NetworkChanged { .. } => self.network,
                 EventKind::Imported { .. } => false,
+                EventKind::AskNewApp { .. } => self.new_app,
                 // The user made these changes themselves.
                 EventKind::RuleAdded { .. }
                 | EventKind::RuleChanged { .. }
@@ -138,6 +139,10 @@ pub fn text(kind: &EventKind) -> Option<(String, String)> {
             ("Rules are applied again".to_string(), "Blocks and limits are active.".to_string())
         }
         EventKind::Imported { .. } => return None,
+        EventKind::AskNewApp { app, name } => (
+            format!("{name} wants to use the network"),
+            format!("It's on hold until you allow or block it ({app})."),
+        ),
         // Moving between unmetered networks changes nothing worth a popup.
         EventKind::NetworkChanged { metered: false, rules: 0, .. } => return None,
         EventKind::NetworkChanged { name, metered, rules } => {
@@ -170,6 +175,18 @@ pub fn buttons(kind: &EventKind) -> Option<(AppId, String, Vec<Button>)> {
     match kind {
         EventKind::NewApp { app, name } => {
             Some((app.clone(), name.clone(), vec![("block", "Block", QuickAction::Block)]))
+        }
+        EventKind::AskNewApp { app, name } => {
+            use nwl_core::api::Answer;
+            Some((
+                app.clone(),
+                name.clone(),
+                vec![
+                    ("allow", "Allow", QuickAction::Answer(Answer::Allow)),
+                    ("once", "This time", QuickAction::Answer(Answer::Once)),
+                    ("block", "Block", QuickAction::Answer(Answer::Block)),
+                ],
+            ))
         }
         EventKind::TrafficSpike { app, name, .. } => Some((
             app.clone(),

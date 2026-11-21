@@ -103,6 +103,22 @@ impl When {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AnswerArg {
+    /// Allow it from now on.
+    Allow,
+    /// Allow it until nwld restarts.
+    Once,
+    /// Block it (adds a rule).
+    Block,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum PresetAction {
     Add,
     Remove,
@@ -221,6 +237,19 @@ enum Cmd {
     },
     /// Recent events (new applications, quotas reached, rule changes).
     Events,
+    /// Ask before new apps use the network: show the setting and waiting
+    /// apps, or turn it on or off.
+    Ask {
+        #[arg(value_enum)]
+        set: Option<OnOff>,
+    },
+    /// Answer about an app waiting to use the network.
+    Answer {
+        /// The app (name or path, as `nwl ask` shows it).
+        app: String,
+        #[arg(value_enum)]
+        answer: AnswerArg,
+    },
     /// Ready-made rule sets: list them, or add or remove one, e.g.
     /// `nwl preset add hotspot-saver`.
     Preset {
@@ -734,6 +763,36 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 table(&headers, &rows, &[2, 3, 6]);
             }
+        }
+        Cmd::Ask { set } => {
+            if let Some(set) = set {
+                c.call("PUT", "/api/settings", Some(json!({ "ask_new_apps": matches!(set, OnOff::On) })))?;
+            }
+            let on = c.get("/api/settings")?["ask_new_apps"] == true;
+            println!("ask before new apps use the network: {}", if on { "on" } else { "off" });
+            let prompts = c.get("/api/prompts")?;
+            for p in prompts.as_array().into_iter().flatten() {
+                println!(
+                    "  waiting: {}  ({})",
+                    p["name"].as_str().unwrap_or(""),
+                    p["app"].as_str().unwrap_or("")
+                );
+            }
+        }
+        Cmd::Answer { app, answer } => {
+            let prompts = c.get("/api/prompts")?;
+            let found = prompts.as_array().into_iter().flatten().find(|p| {
+                p["app"].as_str() == Some(app.as_str())
+                    || p["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(&app))
+            });
+            let Some(p) = found else { bail!("no app called {app:?} is waiting; see `nwl ask`") };
+            let answer = match answer {
+                AnswerArg::Allow => "allow",
+                AnswerArg::Once => "once",
+                AnswerArg::Block => "block",
+            };
+            c.call("POST", "/api/prompts/answer", Some(json!({ "app": p["app"], "answer": answer })))?;
+            println!("{}: {answer}", p["name"].as_str().unwrap_or(""));
         }
         Cmd::Preset { action, name } => {
             use nwl_core::presets::{Preset, PRESETS};

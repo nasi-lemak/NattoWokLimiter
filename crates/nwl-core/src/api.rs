@@ -85,6 +85,12 @@ pub enum EventKind {
     Paused,
     /// The user resumed all rules.
     Resumed,
+    /// A new app wants to use the network and is held until the user
+    /// answers ("ask about new apps" is on).
+    AskNewApp {
+        app: AppId,
+        name: String,
+    },
     /// Rules were restored from a backup.
     Imported {
         /// Rules added (merge) or now in place (replace).
@@ -131,6 +137,9 @@ pub struct AppView {
     /// Whether `GET /api/icon?app=` has an icon for it.
     #[serde(default)]
     pub icon: bool,
+    /// Held until the user answers whether it may use the network.
+    #[serde(default)]
+    pub waiting: bool,
     pub pids: Vec<u32>,
     pub connections: usize,
     pub rate_up: u64,
@@ -175,6 +184,38 @@ pub struct Overview {
     pub last_event: u64,
     #[serde(default)]
     pub network: NetworkView,
+    /// New apps waiting for the user's answer, oldest first.
+    #[serde(default)]
+    pub prompts: Vec<Prompt>,
+}
+
+/// A new app held until the user decides (`GET /api/prompts`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prompt {
+    pub app: AppId,
+    pub name: String,
+    /// When it was first seen, unix milliseconds.
+    pub since: i64,
+}
+
+/// The user's answer to a [`Prompt`] (`POST /api/prompts/answer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Answer {
+    /// Allow it from now on.
+    Allow,
+    /// Allow it until nwld restarts; ask again after that.
+    Once,
+    /// Block it (adds a rule).
+    Block,
+}
+
+/// Daemon settings (`GET/PUT /api/settings`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonSettings {
+    /// Hold apps using the network for the first time until the user answers.
+    #[serde(default)]
+    pub ask_new_apps: bool,
 }
 
 /// The current network, what was detected and what the user overrode

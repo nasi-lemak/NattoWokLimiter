@@ -7,14 +7,16 @@ use crate::store::{KnownApps, Store, UsageDb};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use nwl_core::accounting::Accountant;
 use nwl_core::api::{
+    Answer, Backup, DaemonSettings, ImportResult, NetworkView, Prompt, BACKUP_FORMAT, BACKUP_VERSION,
+};
+use nwl_core::api::{
     AppView, ConnView, EnforcementStatus, Event, EventKind, Overview, RemoteView, UsageDay, UsageEntry,
 };
-use nwl_core::api::{Backup, ImportResult, NetworkView, BACKUP_FORMAT, BACKUP_VERSION};
 use nwl_core::model::{AppId, ConnKey, Connection, Direction, ProcessInfo, Snapshot};
 use nwl_core::network::{Detected, Network, Overrides};
 use nwl_core::quota::{QuotaStatus, QuotaTracker, QuotaUsage};
 use nwl_core::remotes::{RemoteStats, RemoteTracker};
-use nwl_core::rules::{Action, Day, MatchCtx, Period, Rule, RuleError, RuleId, RuleSet};
+use nwl_core::rules::{Action, AppPattern, Day, MatchCtx, Matcher, Period, Rule, RuleError, RuleId, RuleSet};
 use nwl_core::spikes::SpikeDetector;
 use nwl_platform::appinfo::{AppCatalog, AppInfo};
 use nwl_platform::{EnforceReport, Policy};
@@ -26,6 +28,10 @@ const USAGE: &str = "usage.json";
 const HISTORY: &str = "history.json";
 const KNOWN_APPS: &str = "known_apps.json";
 const NETWORK: &str = "network.json";
+const SETTINGS: &str = "settings.json";
+/// Ids of the temporary rules that hold apps waiting for an answer, far
+/// above any user rule's.
+const WAITING_RULE_BASE: RuleId = 1 << 48;
 const MAX_EVENTS: usize = 500;
 
 pub struct Engine {
@@ -52,6 +58,11 @@ pub struct Engine {
     network: Network,
     /// How the network is detected; empty until the first detection.
     network_source: String,
+    settings: DaemonSettings,
+    /// New apps held until the user answers, oldest first.
+    pending: Vec<Prompt>,
+    /// Apps allowed "this time": not asked again until nwld restarts.
+    allowed_once: std::collections::HashSet<AppId>,
     /// Quota rule -> period in which its 80% warning was raised.
     warned: HashMap<RuleId, String>,
     /// Whether quota states have been taken in since startup. The first
@@ -136,6 +147,9 @@ impl Engine {
             overrides: store.load(NETWORK)?.unwrap_or_default(),
             network: Network::default(),
             network_source: String::new(),
+            settings: store.load(SETTINGS)?.unwrap_or_default(),
+            pending: Vec::new(),
+            allowed_once: Default::default(),
             warned: HashMap::new(),
             quotas_primed: false,
             rules,
@@ -225,6 +239,65 @@ impl Engine {
             Some((day, minute)) => self.rules.effective_at(day, minute, &self.network),
             None => self.rules.clone(),
         };
+        // Apps waiting for an answer are blocked, before any other rule.
+        let waiting = self.pending.iter().enumerate().map(|(i, p)| Rule {
+            id: WAITING_RULE_BASE + i as RuleId,
+            name: format!("Waiting for your answer: {}", p.name),
+            enabled: true,
+            matcher: Matcher { app: Some(AppPattern(p.app.0.clone())), ..Matcher::default() },
+            action: Action::Block { direction: Direction::Both },
+            schedule: None,
+            network: None,
+        });
+        self.effective.rules.splice(0..0, waiting);
+    }
+
+    pub fn settings(&self) -> DaemonSettings {
+        self.settings.clone()
+    }
+
+    pub fn set_settings(&mut self, settings: DaemonSettings) -> anyhow::Result<()> {
+        // Turning asking off lets waiting apps go.
+        if !settings.ask_new_apps {
+            for p in std::mem::take(&mut self.pending) {
+                self.known_apps.insert(p.app);
+            }
+            self.refresh_effective();
+        }
+        self.settings = settings;
+        self.store.save(SETTINGS, &self.settings)
+    }
+
+    pub fn prompts(&self) -> Vec<Prompt> {
+        self.pending.clone()
+    }
+
+    /// The user's answer about a new app.
+    pub fn answer(&mut self, app: &AppId, answer: Answer) -> Result<(), String> {
+        let i = self.pending.iter().position(|p| &p.app == app).ok_or("no app with this name is waiting")?;
+        let prompt = self.pending.remove(i);
+        match answer {
+            Answer::Allow => {
+                self.known_apps.insert(prompt.app);
+            }
+            // Not remembered: asked again after a restart.
+            Answer::Once => {
+                self.allowed_once.insert(prompt.app);
+            }
+            Answer::Block => {
+                self.known_apps.insert(prompt.app.clone());
+                let rule = serde_json::json!({
+                    "name": format!("Block {}", prompt.name),
+                    "match": {"app": prompt.app.0},
+                    "action": {"type": "block"},
+                });
+                let rule: Rule = serde_json::from_value(rule).map_err(|e| e.to_string())?;
+                self.add_rule(rule).map_err(|e| e.to_string())?;
+            }
+        }
+        self.refresh_effective();
+        self.dirty = true;
+        Ok(())
     }
 
     /// Takes in the latest network detection (polled by the daemon).
@@ -381,16 +454,31 @@ impl Engine {
         let mut new_apps = Vec::new();
         let seen: Vec<AppId> = snap.processes.values().map(|p| p.app_id()).collect();
         self.learn_apps(seen);
+        let mut asked = false;
         for process in snap.processes.values() {
             let app = process.app_id();
-            if self.known_apps.insert(app.clone()) && !self.suppress_new_app_events {
-                new_apps.push((app.clone(), self.app_name(&app)));
+            let waiting = self.pending.iter().any(|p| p.app == app);
+            if !waiting && self.known_apps.insert(app.clone()) && !self.suppress_new_app_events {
+                let name = self.app_name(&app);
+                if self.settings.ask_new_apps && !self.allowed_once.contains(&app) {
+                    // Known only once answered: a restart asks again.
+                    self.known_apps.remove(&app);
+                    let since = chrono::Utc::now().timestamp_millis();
+                    self.pending.push(Prompt { app: app.clone(), name: name.clone(), since });
+                    self.push_event(EventKind::AskNewApp { app: app.clone(), name });
+                    asked = true;
+                } else {
+                    new_apps.push((app.clone(), name));
+                }
             }
             self.app_samples.insert(app, process.clone());
         }
         self.suppress_new_app_events = false;
         for (app, name) in new_apps {
             self.push_event(EventKind::NewApp { app, name });
+        }
+        if asked {
+            self.refresh_effective();
         }
         self.app_samples.retain(|app, _| self.accountant.apps().any(|a| &a.app == app));
 
@@ -585,10 +673,12 @@ impl Engine {
                             || self.exhausted.contains(&r.id))
                 });
                 let info = self.app_info.get(&s.app).and_then(Option::as_ref);
+                let waiting = self.pending.iter().any(|p| p.app == s.app);
                 AppView {
                     app: s.app.clone(),
                     name: info.map_or_else(|| s.name.clone(), |i| i.name.clone()),
                     icon: info.is_some_and(|i| i.icon.is_some()),
+                    waiting,
                     pids: s.pids.iter().copied().collect(),
                     connections: s.connections,
                     rate_up: s.rate_up,
@@ -599,7 +689,7 @@ impl Engine {
                     rules: scoped.iter().map(|r| r.id).collect(),
                     block_rule,
                     limit_rule,
-                    blocked,
+                    blocked: blocked || waiting,
                 }
             })
             .collect();
@@ -780,6 +870,7 @@ impl Engine {
             status: self.status.clone(),
             last_event: self.next_event_id - 1,
             network: self.network_view(),
+            prompts: self.pending.clone(),
         }
     }
 }
@@ -1212,6 +1303,54 @@ mod tests {
         invalid.rules.push(rule(r#"{"action":{"type":"limit"}}"#));
         assert!(other.import(invalid, false).is_err());
         assert_eq!(other.rules.rules.len(), 1, "unchanged after a failed import");
+    }
+
+    #[test]
+    fn new_apps_wait_for_an_answer() {
+        let store = temp_store("ask");
+        let dir = store.dir().to_path_buf();
+        let mut e = Engine::new(store, 10).unwrap();
+        e.ingest(Snapshot::default(), at(12)); // first run: nothing is new
+        e.set_settings(DaemonSettings { ask_new_apps: true }).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        let steam = AppId("/opt/steam/steam".into());
+        assert_eq!(e.prompts().len(), 1);
+        assert!(e.apps()[0].waiting && e.apps()[0].blocked);
+        let rules = e.policy().rules.enabled().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(rules, [WAITING_RULE_BASE], "held by a temporary rule");
+        assert!(e.events_since(0).iter().any(|ev| matches!(ev.kind, EventKind::AskNewApp { .. })));
+        e.ingest(snap(1000, 0, 0), at(12));
+        assert_eq!(e.prompts().len(), 1, "asked once");
+        e.save().unwrap();
+
+        // Unanswered when nwld restarts: asked again.
+        let mut e = Engine::new(Store::open(dir.clone()).unwrap(), 10).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        assert_eq!(e.prompts().len(), 1);
+        e.answer(&steam, Answer::Once).unwrap();
+        assert!(e.prompts().is_empty() && !e.apps()[0].blocked);
+        assert_eq!(e.policy().rules.enabled().count(), 0);
+        e.save().unwrap();
+
+        // "This time" is forgotten on restart; "Block" adds a rule.
+        let mut e = Engine::new(Store::open(dir.clone()).unwrap(), 10).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        assert_eq!(e.prompts().len(), 1);
+        e.answer(&steam, Answer::Block).unwrap();
+        assert_eq!(e.rules.rules[0].name, "Block steam");
+        assert!(e.answer(&steam, Answer::Allow).is_err(), "nothing waiting any more");
+        e.save().unwrap();
+        let mut e = Engine::new(Store::open(dir).unwrap(), 10).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        assert!(e.prompts().is_empty(), "a blocked app is known");
+
+        // Turning asking off releases waiting apps.
+        let mut e = Engine::new(temp_store("ask-off"), 10).unwrap();
+        e.ingest(Snapshot::default(), at(12));
+        e.set_settings(DaemonSettings { ask_new_apps: true }).unwrap();
+        e.ingest(snap(0, 0, 0), at(12));
+        e.set_settings(DaemonSettings { ask_new_apps: false }).unwrap();
+        assert!(e.prompts().is_empty() && e.policy().rules.enabled().count() == 0);
     }
 
     #[test]

@@ -73,6 +73,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pause", post(pause))
         .route("/api/network", get(network).put(set_network))
         .route("/api/icon", get(icon))
+        .route("/api/settings", get(settings).put(set_settings))
+        .route("/api/prompts", get(prompts))
+        .route("/api/prompts/answer", post(answer))
         .route("/api/export", get(export))
         .route("/api/import", post(import))
         .route("/api/quotas", get(quotas))
@@ -284,6 +287,46 @@ async fn pause(State(s): State<AppState>, Json(body): Json<PauseBody>) -> Respon
     s.engine().set_paused(body.paused);
     s.reapply();
     Json(s.engine().status.clone()).into_response()
+}
+
+async fn settings(State(s): State<AppState>) -> impl IntoResponse {
+    Json(s.engine().settings())
+}
+
+async fn set_settings(
+    State(s): State<AppState>,
+    Json(settings): Json<nwl_core::api::DaemonSettings>,
+) -> Response {
+    let result = s.engine().set_settings(settings);
+    match result {
+        Ok(()) => {
+            s.reapply();
+            Json(s.engine().settings()).into_response()
+        }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &format!("saving settings: {e:#}")),
+    }
+}
+
+async fn prompts(State(s): State<AppState>) -> impl IntoResponse {
+    Json(s.engine().prompts())
+}
+
+#[derive(Deserialize)]
+struct AnswerBody {
+    app: nwl_core::model::AppId,
+    answer: nwl_core::api::Answer,
+}
+
+/// Allows or blocks an app that is waiting for an answer.
+async fn answer(State(s): State<AppState>, Json(body): Json<AnswerBody>) -> Response {
+    let result = s.engine().answer(&body.app, body.answer);
+    match result {
+        Ok(()) => {
+            s.reapply();
+            Json(s.engine().prompts()).into_response()
+        }
+        Err(e) => error(StatusCode::NOT_FOUND, &e),
+    }
 }
 
 /// A backup file download.

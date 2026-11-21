@@ -16,6 +16,8 @@ pub enum QuickAction {
     /// Limit download and upload to this many bytes/s.
     Limit(u64),
     RemoveLimit,
+    /// Answer about an app waiting to use the network.
+    Answer(nwl_core::api::Answer),
 }
 
 /// The parts of an app an action needs.
@@ -93,6 +95,16 @@ pub fn request(target: &Target, action: &QuickAction) -> Option<Request> {
             path: format!("/api/rules/{}", target.limit_rule?),
             body: None,
             done: format!("Removed the limit on {name}"),
+        },
+        QuickAction::Answer(answer) => Request {
+            method: "POST",
+            path: "/api/prompts/answer".into(),
+            body: Some(json!({"app": target.app, "answer": answer})),
+            done: match answer {
+                nwl_core::api::Answer::Allow => format!("Allowed {name}"),
+                nwl_core::api::Answer::Once => format!("Allowed {name} this time"),
+                nwl_core::api::Answer::Block => format!("Blocked {name}"),
+            },
         },
     })
 }

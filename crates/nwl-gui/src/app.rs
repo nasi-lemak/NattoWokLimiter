@@ -1107,6 +1107,25 @@ impl NwlApp {
     }
 
     fn rules_tab(&mut self, ui: &mut Ui) {
+        // Asking about new apps: a daemon setting.
+        let settings = lock(&self.data).settings.clone();
+        if let Some(mut s) = settings {
+            let before = s.ask_new_apps;
+            ui.checkbox(&mut s.ask_new_apps, RichText::new("Ask before new apps use the network").strong())
+                .on_hover_text(
+                    "An app using the network for the first time is blocked until you allow it. \
+                     It is noticed within a second, so its very first packets may get through.",
+                );
+            if s.ask_new_apps != before {
+                let done = if s.ask_new_apps {
+                    "New apps will wait for your answer"
+                } else {
+                    "New apps are allowed"
+                };
+                self.act("PUT", "/api/settings", serde_json::to_value(&s).ok(), done);
+            }
+            ui.add_space(4.0);
+        }
         let mut export = false;
         ui.horizontal(|ui| {
             ui.weak("Access rules: first match wins. Limits and quotas always apply.");
@@ -1637,6 +1656,61 @@ impl NwlApp {
         }
     }
 
+    /// Asks about the oldest app waiting to use the network.
+    fn prompt_window(&mut self, ctx: &egui::Context) {
+        let (prompt, more) = {
+            let d = lock(&self.data);
+            let prompts = d.overview.as_ref().map(|o| o.prompts.clone()).unwrap_or_default();
+            (prompts.first().cloned(), prompts.len().saturating_sub(1))
+        };
+        let Some(p) = prompt else { return };
+        let icons = self.icon_uris.clone();
+        let mut answer = None;
+        egui::Window::new("A new app wants to go online")
+            .id(egui::Id::new("prompt"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                app_cell(ui, &p.name, &p.app.0, false, None, &icons);
+                ui.add_space(6.0);
+                ui.label(format!(
+                    "{} is using the network for the first time. It's on hold until you decide.",
+                    p.name
+                ));
+                if more > 0 {
+                    ui.weak(format!("{more} more waiting after this one."));
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    use nwl_core::api::Answer;
+                    let allow =
+                        egui::Button::new(RichText::new("Allow").color(col_on_accent())).fill(col_accent());
+                    if ui.add(allow).on_hover_text("Allow it from now on").clicked() {
+                        answer = Some(Answer::Allow);
+                    }
+                    if ui.button("Allow this time").on_hover_text("Ask again after a restart").clicked() {
+                        answer = Some(Answer::Once);
+                    }
+                    let block = egui::Button::new(RichText::new("Block").color(crate::theme::current().bg))
+                        .fill(col_bad());
+                    if ui.add(block).on_hover_text("Adds a block rule for it").clicked() {
+                        answer = Some(Answer::Block);
+                    }
+                });
+            });
+        if let Some(answer) = answer {
+            let target = crate::actions::Target {
+                app: p.app.clone(),
+                name: p.name.clone(),
+                block_rule: None,
+                limit_rule: None,
+            };
+            self.quick_action(&target, &crate::actions::QuickAction::Answer(answer));
+        }
+    }
+
     /// Ready-made rule sets: what each does, and Add or Remove.
     fn presets_window(&mut self, ctx: &egui::Context) {
         if !self.show_presets {
@@ -1886,6 +1960,9 @@ impl NwlApp {
                         EventKind::EnforcementRecovered => ("Enforcement recovered".into(), Some(col_ok())),
                         EventKind::Paused => ("All rules paused".into(), Some(col_accent())),
                         EventKind::Resumed => ("All rules resumed".into(), Some(col_ok())),
+                        EventKind::AskNewApp { name, .. } => {
+                            (format!("{name} wanted to use the network; held until answered"), Some(col_accent()))
+                        }
                         EventKind::Imported { rules, replaced: true } => {
                             (format!("Rules restored from a backup ({rules} rules)"), None)
                         }
@@ -2538,6 +2615,7 @@ impl eframe::App for NwlApp {
         self.about_window(&ctx);
         self.import_window(&ctx);
         self.presets_window(&ctx);
+        self.prompt_window(&ctx);
 
         let (toast, undo) = {
             let d = lock(&self.data);
