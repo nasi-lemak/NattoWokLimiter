@@ -126,7 +126,13 @@ sudo dnf install ./target/generate-rpm/nattowok-*.rpm     # Fedora, openSUSE, ..
 Then start **NattoWok Limiter** from the application menu. Its icon sits in the tray, and closing the
 window keeps it there. Without packages, copy the three binaries to `/usr/bin` and install
 [`packaging/nwld.service`](packaging/nwld.service) and [`packaging/nattowok.desktop`](packaging/nattowok.desktop).
-Windows builds (`nattowok-windows-x86_64.zip`) come from CI the same way.
+### Install on Windows
+
+Run `nattowok-setup-x86_64.exe` (from a release, or the `windows-x86_64` CI artifact). It installs the
+service (started now and with Windows), the CLI and the desktop app with Start menu entries, and
+removes all of it on uninstall. Without the installer, `nwld.exe --install-service` (as
+Administrator) registers the service; `--uninstall-service` removes it. Logs are in
+`%ProgramData%\NattoWokLimiter\nwld.log`.
 
 ### CLI
 

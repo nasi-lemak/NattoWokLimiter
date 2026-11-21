@@ -61,19 +61,54 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/nwld.exe, target/release/nwl.exe, target/release/nattowok.exe, README.md, LICENSE dist/
           Compress-Archive -Path dist/* -DestinationPath nattowok-windows-x86_64.zip -Force
+      # The runner is an Administrator: run nwld as a real Windows service.
+      - name: Service (install, check the API, remove)
+        run: |
+          target\release\nwld.exe --install-service
+          Start-Sleep -Seconds 8
+          $svc = Get-Service NattoWokLimiter
+          if ($svc.Status -ne 'Running') { Get-Content "$env:ProgramData\NattoWokLimiter\nwld.log" -ErrorAction SilentlyContinue; throw "service is $($svc.Status)" }
+          $status = Invoke-RestMethod http://127.0.0.1:7657/api/status
+          "nwld $($status.version): $($status.enforcement.monitor) / $($status.enforcement.enforcer)"
+          target\release\nwl.exe status
+          target\release\nwld.exe --uninstall-service
+          if (Get-Service NattoWokLimiter -ErrorAction SilentlyContinue) { throw "service still installed" }
+      - name: Installer
+        run: |
+          choco install innosetup --no-progress -y
+          $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq nwld).version
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\windows\nattowok.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Copy-Item target\installer\nattowok-setup-x86_64.exe .
+      - name: Install silently, check the service, uninstall
+        run: |
+          Start-Process .\nattowok-setup-x86_64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep -Seconds 8
+          $dir = "$env:ProgramFiles\NattoWok Limiter"
+          if ((Get-Service NattoWokLimiter).Status -ne 'Running') { throw "service not running after install" }
+          & "$dir\nwl.exe" status
+          if ($LASTEXITCODE -ne 0) { throw "nwl status failed" }
+          Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep -Seconds 5
+          if (Get-Service NattoWokLimiter -ErrorAction SilentlyContinue) { throw "service left behind after uninstall" }
+          if (Test-Path "$dir\nwld.exe") { throw "files left behind after uninstall" }
       # Downloads for testing; kept a week. Uploading is a convenience, so a
       # full artifact quota on the account must not fail the build.
       - uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: windows-x86_64
-          path: nattowok-windows-x86_64.zip
+          path: |
+            nattowok-windows-x86_64.zip
+            nattowok-setup-x86_64.exe
           retention-days: 7
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: nattowok-windows-x86_64.zip
+          files: |
+            nattowok-windows-x86_64.zip
+            nattowok-setup-x86_64.exe
 
   packages:
     runs-on: ubuntu-latest

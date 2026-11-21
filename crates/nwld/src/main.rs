@@ -6,6 +6,8 @@ mod geo;
 mod identity;
 mod resolver;
 mod store;
+#[cfg(windows)]
+mod winservice;
 
 use anyhow::{bail, Context};
 use api::{AppState, Wake};
@@ -19,7 +21,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, long_version = nwl_core::LONG_VERSION, about = "NattoWokLimiter daemon: per-app network monitor, firewall and bandwidth limiter")]
 struct Args {
     /// Address for the API and web dashboard (loopback only).
@@ -54,6 +56,18 @@ struct Args {
     /// .mmdb files), besides <state>/geoip and the system's GeoIP folders.
     #[arg(long)]
     geoip: Option<PathBuf>,
+    /// Run under the Windows service manager (set by --install-service).
+    #[cfg(windows)]
+    #[arg(long, hide = true)]
+    service: bool,
+    /// Install nwld as a Windows service that starts with Windows, and start it.
+    #[cfg(windows)]
+    #[arg(long)]
+    install_service: bool,
+    /// Stop and remove the Windows service.
+    #[cfg(windows)]
+    #[arg(long)]
+    uninstall_service: bool,
 }
 
 /// The monitor, the enforcer, and a warning when enforcement had to be disabled.
@@ -209,22 +223,55 @@ async fn shutdown_signal() {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+fn state_dir(args: &Args) -> PathBuf {
+    let dir = args.state_dir.clone().unwrap_or_else(store::default_state_dir);
+    if args.demo {
+        dir.join("demo")
+    } else {
+        dir
+    }
+}
+
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    #[cfg(windows)]
+    {
+        if args.install_service {
+            return winservice::install();
+        }
+        if args.uninstall_service {
+            return winservice::uninstall();
+        }
+        if args.service {
+            // No console under the service manager: log to a file.
+            let dir = state_dir(&args);
+            std::fs::create_dir_all(&dir)?;
+            let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("nwld.log"))?;
+            tracing_subscriber::fmt()
+                .with_env_filter(filter())
+                .with_ansi(false)
+                .with_writer(Mutex::new(log))
+                .init();
+            return winservice::run(args);
+        }
+    }
+    tracing_subscriber::fmt().with_env_filter(filter()).init();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run(args, shutdown_signal()))
+}
+
+/// The daemon, until `stop` completes (Ctrl+C / SIGTERM, or the Windows
+/// service manager's stop request).
+async fn run(args: Args, stop: impl std::future::Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
     if !args.listen.ip().is_loopback() {
         bail!("--listen must be a loopback address: the API has no authentication yet");
     }
 
-    let mut state_dir = args.state_dir.clone().unwrap_or_else(store::default_state_dir);
-    if args.demo {
-        state_dir = state_dir.join("demo");
-    }
+    let state_dir = state_dir(&args);
     let store = store::Store::open(state_dir.clone())
         .with_context(|| format!("opening state directory {}", state_dir.display()))?;
     let mut engine = Engine::new(store, args.history)?;
@@ -296,7 +343,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("dashboard: http://{}", args.listen);
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+            stop.await;
             let _ = stop_tx.send(true);
         })
         .await?;

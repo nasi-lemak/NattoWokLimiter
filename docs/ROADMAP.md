@@ -57,6 +57,6 @@ trade-offs stay visible.
   and icon). Next: `Info.plist` on macOS, and grouping helper processes (browser and launcher helpers)
   under their app.
 - **Remote management** with authentication (token or mTLS), and several machines in one dashboard.
-- **Packages.** deb and rpm are done (built by CI, attached to releases). Next: AUR, an MSI with a
-  service installer, Homebrew.
+- **Packages.** deb, rpm and a Windows installer (with the service) are done, built and tested by CI.
+  Next: AUR, winget, Homebrew, and code signing for the Windows binaries.
 - **Config import** from NetLimiter and GlassWire rule exports, where feasible.

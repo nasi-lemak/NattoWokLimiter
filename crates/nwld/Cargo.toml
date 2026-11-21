@@ -30,6 +30,10 @@ maxminddb = "0.33"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+# Running as a Windows service.
+windows-service = "0.8"
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
